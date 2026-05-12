@@ -111,7 +111,7 @@ python training/train_dsrn_sft.py \
     --new_model_name Echo-DSRN-114M-Instruct
 ```
 
-For advanced training, the codebase implements **Targeted Exact-Match Binding**, granular layer freezing, and optionally utilizes the Muon optimizer (`--use_muon`) for structural grounding.
+For advanced training, the codebase implements **Targeted Exact-Match Binding** and granular layer freezing for structural grounding.
 
 ## License
 
