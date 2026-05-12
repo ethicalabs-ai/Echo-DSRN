@@ -1,0 +1,50 @@
+{%- if messages[0]['role'] == 'system' %}
+    {%- set system_message = messages[0]['content'] %}
+{%- else %}
+    {%- set system_message = 'You are Echo-DSRN, created by ethicalabs.ai. You are a helpful assistant.' %}
+{%- endif %}
+
+{%- if tools %}
+    {{- '<|system|>\n' + system_message }}
+    {{- "\n\n# Tools\n\nYou are a precise routing agent. You have access to the following tools. If a tool is required, output EXACTLY the tool call format. If no tool is required, respond conversationally.\n\nAvailable tools:\n<tools>" }}
+    {%- for tool in tools %}
+        {{- "\n" + tool | tojson }}
+    {%- endfor %}
+    {{- "\n</tools><|end|>\n" }}
+{%- else %}
+    {{- '<|system|>\n' + system_message + '<|end|>\n' }}
+{%- endif %}
+
+{%- for message in messages %}
+    {%- if (message['role'] == "user") or (message['role'] == "system" and not loop.first) or (message['role'] == "assistant" and not message['tool_calls']) %}
+        {{- '<|' + message['role'] + '|>\n' + message['content'] + '<|end|>\n' }}
+    {%- elif message['role'] == "assistant" %}
+        {{- '<|assistant|>\n' }}
+        {%- if message['content'] %}
+            {{- message['content'] }}
+        {%- endif %}
+        {%- if message['tool_calls'] %}
+            {%- for tool_call in message['tool_calls'] %}
+                {%- if tool_call['function'] is defined %}
+                    {%- set tool_call = tool_call['function'] %}
+                {%- endif %}
+                {{- '\n<tool_call>\n{"name": "' + tool_call['name'] + '", "arguments": ' + tool_call['arguments'] | tojson + '}\n</tool_call>' }}
+            {%- endfor %}
+        {%- endif %}
+        {{- '<|end|>\n' }}
+    {%- elif message['role'] == "tool" %}
+        {%- if loop.first or messages[loop.index0 - 1]['role'] != "tool" %}
+            {{- '<|user|>\n' }}
+        {%- endif %}
+        {{- '<tool_response>\n' + message['content'] + '\n</tool_response>' }}
+        {%- if loop.last or messages[loop.index0 + 1]['role'] != "tool" %}
+            {{- '<|end|>\n' }}
+        {%- endif %}
+    {%- endif %}
+{%- endfor %}
+
+{%- if add_generation_prompt %}
+    {{- '<|assistant|>\n' }}
+{%- else %}
+    {{- eos_token }}
+{%- endif %}

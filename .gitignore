@@ -1,0 +1,28 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+.venv/
+.env
+
+# Data and Checkpoints
+./data/
+checkpoints/
+*.bin
+*.pth
+
+# WandB
+wandb/
+
+# IDE
+.vscode/
+.idea/
+.DS_Store
+
+# Misc
+temp/
+
+# Excluded for now
+tests/
+training/
+deploy/

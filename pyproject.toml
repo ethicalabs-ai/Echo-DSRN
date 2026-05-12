@@ -1,0 +1,103 @@
+[project]
+name = "echo-dsrn"
+version = "0.1.0"
+description = "Add your description here"
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = [
+    "click>=8.3.1",
+    "datasets>=2.14.0",
+    "flask>=3.0.0",
+    "jsonschema>=4.25.1",
+    "matplotlib>=3.10.7",
+    "numpy>=1.21.0",
+    "openai>=2.14.0",
+    "peft>=0.18.0",
+    "pyyaml>=6.0.3",
+    "torch>=2.0.0",
+    "tqdm>=4.60.0",
+    "transformers==5.2.0",
+    "trl>=0.25.1",
+    "wandb>=0.16.0",
+    "gradio>=4.0.0",
+    "requests",
+    "rouge-score>=0.1.2",
+    "bitsandbytes",
+    "torch>=2.10.0",
+    "torchvision>=0.25.0",
+    "torchaudio>=2.10.0",
+    "muon-optimizer",
+    "tiktoken>=0.12.0",
+    "sentencepiece>=0.2.1",
+    "outlines>=1.2.12",
+    "spacy>=3.8.14",
+]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["echo_dsrn", "echo_hybrid"]
+
+[dependency-groups]
+dev = [
+    "pytest>=9.0.2",
+]
+rocm = [
+    "bitsandbytes>=0.46.1",
+    "pytorch-triton-rocm",
+    "triton-rocm",
+]
+
+[[tool.uv.index]]
+name = "pytorch-rocm"
+url = "https://download.pytorch.org/whl/rocm7.1/"
+explicit = true
+
+[tool.uv.sources]
+pytorch-triton-rocm = [
+    { index = "pytorch-rocm", marker = "sys_platform == 'linux'" },
+]
+triton-rocm = [
+    { index = "pytorch-rocm", marker = "sys_platform == 'linux'" },
+]
+torch = [
+    { index = "pytorch-rocm", marker = "sys_platform == 'linux'" },
+]
+torchvision = [
+    { index = "pytorch-rocm", marker = "sys_platform == 'linux'" },
+]
+torchaudio = [
+    { index = "pytorch-rocm", marker = "sys_platform == 'linux'" },
+]
+triton = [
+    { index = "pytorch-rocm", marker = "sys_platform == 'linux'" },
+]
+muon-optimizer = { git = "https://github.com/KellerJordan/Muon" }
+
+[tool.uv]
+prerelease = "allow"
+
+# [tool.uv.extra-build-dependencies]
+# flash-attn = ["torch", "packaging", "ninja"]
+
+[tool.black]
+line-length = 100
+skip-string-normalization = true
+target-version = ['py310']
+include = '\.pyi?$'
+extend-exclude = '''
+/(
+  # directories
+  \.cache
+  | \.env
+  | \.git
+  | \.hg
+  | \.mypy_cache
+  | \.tox
+  | \.venv
+  | build
+  | dist
+)/
+'''
