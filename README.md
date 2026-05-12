@@ -116,3 +116,9 @@ For advanced training, the codebase implements **Targeted Exact-Match Binding** 
 ## License
 
 Echo-DSRN is released under the [Apache 2.0 License](LICENSE).
+
+## Citation
+
+```bibtex
+@misc{Massimo Roberto Scamarcia, title={Echo-DSRN-114M: Surprise-Gated Dual-State Recurrent Architecture for Efficient Language Modeling and Classification}, DOI={10.5281/zenodo.19848279}, publisher={Zenodo}, author={Massimo Roberto Scamarcia} }
+```
