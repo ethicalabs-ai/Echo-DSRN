@@ -4,6 +4,7 @@ __pycache__/
 *$py.class
 .venv/
 .env
+venv
 
 # Data and Checkpoints
 ./data/
@@ -21,8 +22,11 @@ wandb/
 
 # Misc
 temp/
+experiments/
 
 # Excluded for now
 tests/
 training/
-deploy/
+datasets/
+datasets_scripts/
+models/

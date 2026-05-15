@@ -7,7 +7,7 @@ class EchoConfig(PretrainedConfig):
     def __init__(
         self,
         vocab_size=49152,
-        embed_dim=768,
+        embed_dim=None,
         num_layers=4,
         num_heads=4,
         mlp_ratio=4,
@@ -16,12 +16,23 @@ class EchoConfig(PretrainedConfig):
         use_rmsnorm=True,
         **kwargs,
     ):
-        # Synchronize hidden_size and embed_dim
-        hidden_size = kwargs.pop("hidden_size", embed_dim)
-        if embed_dim != hidden_size:
-            # Prefer larger if both are non-standard
-            major_dim = max(embed_dim, hidden_size)
-            embed_dim = hidden_size = major_dim
+        # Synchronize hidden_size / embed_dim (HF synonym pair).
+        # Priority: explicit embed_dim > explicit hidden_size > package default (768).
+        hidden_size = kwargs.pop("hidden_size", None)
+
+        if embed_dim is None and hidden_size is None:
+            embed_dim = 768  # package default
+        elif embed_dim is None:
+            embed_dim = hidden_size
+        elif hidden_size is None:
+            hidden_size = embed_dim
+        elif embed_dim != hidden_size:
+            raise ValueError(
+                f"embed_dim ({embed_dim}) and hidden_size ({hidden_size}) must be equal in "
+                "Echo-DSRN — they are the same architectural dimension. Pass only one."
+            )
+
+        hidden_size = embed_dim  # keep them in sync
 
         self.vocab_size = vocab_size
         self.embed_dim = embed_dim

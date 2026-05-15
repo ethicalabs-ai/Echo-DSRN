@@ -819,6 +819,10 @@ class EchoForCausalLM(EchoPreTrainedModel, GenerationMixin):
     _supports_cache_class = False
     _supports_static_cache = False
     main_input_name = "input_ids"
+    # Required by the modern HF tie_weights() mechanism (transformers ≥ 4.47).
+    # Without this dict being non-None, tie_weights() returns early even when
+    # tie_word_embeddings=True and get_input/output_embeddings() are both defined.
+    _tied_weights_keys = {"lm_head.weight": "model.embedding.weight"}
 
     def __init__(self, config: EchoConfig):
         super().__init__(config)
@@ -827,6 +831,12 @@ class EchoForCausalLM(EchoPreTrainedModel, GenerationMixin):
 
         # Initialize weights and apply final processing
         self.post_init()
+
+    def get_input_embeddings(self):
+        return self.model.embedding
+
+    def set_input_embeddings(self, value):
+        self.model.embedding = value
 
     def _set_gradient_checkpointing(self, enable=True, gradient_checkpointing_func=None):
         """Enable/disable gradient checkpointing."""
