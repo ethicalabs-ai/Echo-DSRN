@@ -89,7 +89,7 @@ class HybridEchoModel(Qwen2PreTrainedModel):
             nn.init.zeros_(injector.surprise_lambda)
             w = injector.linear_pred.weight
             if w.dtype in (torch.bfloat16, torch.float16):
-                tmp = torch.empty_like(w, dtype=torch.float32, device="cpu")
+                tmp = torch.empty_like(w, dtype=torch.float32, device=w.device)
                 nn.init.orthogonal_(tmp, gain=0.1)
                 with torch.no_grad():
                     w.copy_(tmp.to(device=w.device, dtype=w.dtype))
