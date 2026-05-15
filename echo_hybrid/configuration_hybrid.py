@@ -77,3 +77,8 @@ class HybridEchoConfig(Qwen2Config):
         self.dsrn_use_triton = dsrn_use_triton
         self.gate_bias_init = gate_bias_init
         self.use_kv_cache = use_kv_cache
+        self.auto_map = {
+            "AutoConfig": "configuration_hybrid.HybridEchoConfig",
+            "AutoModel": "modeling_hybrid.HybridEchoModel",
+            "AutoModelForCausalLM": "modeling_hybrid.HybridEchoForCausalLM",
+        }
