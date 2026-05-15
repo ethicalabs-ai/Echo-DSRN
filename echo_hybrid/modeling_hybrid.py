@@ -65,6 +65,7 @@ class HybridEchoCache(DynamicCache):
 
 class HybridEchoModel(Qwen2PreTrainedModel):
     config_class = HybridEchoConfig
+    _tp_plan = {}  # No tensor parallel plan; required by vLLM TransformersForCausalLM
 
     def __init__(self, config: HybridEchoConfig):
         super().__init__(config)
@@ -292,6 +293,7 @@ class HybridEchoModel(Qwen2PreTrainedModel):
 
 class HybridEchoForCausalLM(Qwen2PreTrainedModel, GenerationMixin):
     config_class = HybridEchoConfig
+    _tp_plan = {}  # No tensor parallel plan; required by vLLM TransformersForCausalLM
     _is_causal = True
     supports_gradient_checkpointing = True
     _supports_cache_class = True
