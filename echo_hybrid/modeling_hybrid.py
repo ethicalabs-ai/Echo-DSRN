@@ -64,6 +64,8 @@ class HybridEchoCache(DynamicCache):
 
 
 class HybridEchoModel(Qwen2PreTrainedModel):
+    config_class = HybridEchoConfig
+
     def __init__(self, config: HybridEchoConfig):
         super().__init__(config)
         self.backbone = Qwen2Model(config)
