@@ -592,9 +592,11 @@ class DSRNBlock(nn.Module):
         intermediate_size = getattr(
             config, "intermediate_size", int(config.hidden_size * getattr(config, "mlp_ratio", 4.0))
         )
-        self.mlp_up = nn.Linear(config.hidden_size, intermediate_size)
+        # Use getattr guard so configs loaded from old JSON (pre-mlp_bias field) default safely.
+        _mlp_bias = getattr(config, "mlp_bias", False)
+        self.mlp_up = nn.Linear(config.hidden_size, intermediate_size, bias=_mlp_bias)
         self.mlp_act = nn.GELU()
-        self.mlp_down = nn.Linear(intermediate_size, config.hidden_size)
+        self.mlp_down = nn.Linear(intermediate_size, config.hidden_size, bias=_mlp_bias)
 
     def forward(
         self, x: torch.Tensor, state_prev: Tuple[torch.Tensor, ...], **kwargs
@@ -712,7 +714,8 @@ class EchoModel(EchoPreTrainedModel):
             nn.init.zeros_(block.surprise_lambda)
             # CRITICAL: Zero-Init Residual Output (Identity Start)
             nn.init.zeros_(block.mlp_down.weight)
-            nn.init.zeros_(block.mlp_down.bias)
+            if block.mlp_down.bias is not None:
+                nn.init.zeros_(block.mlp_down.bias)
 
     def _set_gradient_checkpointing(self, enable=True, gradient_checkpointing_func=None):
         """Enable/disable gradient checkpointing."""
@@ -823,6 +826,41 @@ class EchoForCausalLM(EchoPreTrainedModel, GenerationMixin):
     # Without this dict being non-None, tie_weights() returns early even when
     # tie_word_embeddings=True and get_input/output_embeddings() are both defined.
     _tied_weights_keys = {"lm_head.weight": "model.embedding.weight"}
+
+    @property
+    def _keys_to_ignore_on_load_missing(self):
+        # When mlp_bias=False (the default, and the setting for all v0.1.2 checkpoints),
+        # bias tensors are not present in the checkpoint and should not trigger warnings.
+        # When mlp_bias=True, these keys WILL exist in the checkpoint — do not silence them.
+        if not getattr(self.config, "mlp_bias", False):
+            return [r"model\.blocks\.\d+\.mlp_(up|down)\.bias"]
+        return []
+
+    @classmethod
+    def from_pretrained(cls, pretrained_model_name_or_path, *args, **kwargs):
+        model = super().from_pretrained(pretrained_model_name_or_path, *args, **kwargs)
+
+        # Defense-in-depth: if mlp_bias=False but bias tensors were somehow initialized
+        # (e.g. an old code path created them), zero them out to prevent NaN/Inf
+        # corruption when running in bfloat16.
+        if not getattr(model.config, "mlp_bias", False):
+            zeroed = 0
+            with torch.no_grad():
+                for name, param in model.named_parameters():
+                    if "mlp_up.bias" in name or "mlp_down.bias" in name:
+                        param.zero_()
+                        zeroed += 1
+            if zeroed:
+                import warnings
+
+                warnings.warn(
+                    f"Zeroed {zeroed} MLP bias tensor(s) that were missing from the "
+                    f"checkpoint. This indicates a config/checkpoint mismatch. "
+                    f"Ensure mlp_bias=False in EchoConfig for v0.1.2 checkpoints.",
+                    UserWarning,
+                )
+
+        return model
 
     def __init__(self, config: EchoConfig):
         super().__init__(config)

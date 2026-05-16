@@ -14,6 +14,7 @@ class EchoConfig(PretrainedConfig):
         gate_bias_init=0.0,
         use_hybrid_attention=True,
         use_rmsnorm=True,
+        mlp_bias: bool = False,
         **kwargs,
     ):
         # Synchronize hidden_size / embed_dim (HF synonym pair).
@@ -43,6 +44,7 @@ class EchoConfig(PretrainedConfig):
         self.gate_bias_init = gate_bias_init
         self.use_hybrid_attention = use_hybrid_attention
         self.use_rmsnorm = use_rmsnorm
+        self.mlp_bias = mlp_bias
 
         # Standard HF aliases
         self.num_hidden_layers = num_layers
