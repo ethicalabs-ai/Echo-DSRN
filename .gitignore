@@ -25,7 +25,6 @@ temp/
 experiments/
 
 # Excluded for now
-tests/
 training/
 datasets/
 datasets_scripts/
