@@ -1,3 +1,5 @@
+from typing import Optional
+
 from transformers import PretrainedConfig
 
 
@@ -15,6 +17,11 @@ class EchoConfig(PretrainedConfig):
         use_hybrid_attention=True,
         use_rmsnorm=True,
         mlp_bias: bool = False,
+        # --- Classification fields (optional, ignored by CausalLM) ---
+        num_labels: int = 2,
+        id2label: Optional[dict] = None,
+        label2id: Optional[dict] = None,
+        classifier_dropout: float = 0.0,
         **kwargs,
     ):
         # Synchronize hidden_size / embed_dim (HF synonym pair).
@@ -45,6 +52,7 @@ class EchoConfig(PretrainedConfig):
         self.use_hybrid_attention = use_hybrid_attention
         self.use_rmsnorm = use_rmsnorm
         self.mlp_bias = mlp_bias
+        self.classifier_dropout = classifier_dropout
 
         # Standard HF aliases
         self.num_hidden_layers = num_layers
@@ -55,6 +63,7 @@ class EchoConfig(PretrainedConfig):
             "AutoConfig": "configuration_echo.EchoConfig",
             "AutoModel": "modeling_echo.EchoModel",
             "AutoModelForCausalLM": "modeling_echo.EchoForCausalLM",
+            "AutoModelForSequenceClassification": ("modeling_echo.EchoForSequenceClassification"),
         }
 
         # vLLM Advanced Parallelism Plans
@@ -73,5 +82,20 @@ class EchoConfig(PretrainedConfig):
         self.base_model_pp_plan = {
             "blocks": (["x", "state_prev"], ["x", "h_new_full"])  # Inputs  # Outputs
         }
+
+        # PretrainedConfig manages id2label / label2id / num_labels as
+        # properties internally. Pass them through super().__init__ so HF's
+        # property setters run in the correct order. We must NOT pop them here.
+        if id2label is not None:
+            kwargs["id2label"] = {int(k): v for k, v in id2label.items()}
+            kwargs["label2id"] = {v: int(k) for k, v in id2label.items()}
+        elif "id2label" not in kwargs:
+            # Inject defaults so the property chain initialises cleanly
+            default_id2label = {i: str(i) for i in range(num_labels)}
+            kwargs["id2label"] = default_id2label
+            kwargs["label2id"] = {v: k for k, v in default_id2label.items()}
+
+        if label2id is not None and "label2id" not in kwargs:
+            kwargs["label2id"] = label2id
 
         super().__init__(**kwargs)

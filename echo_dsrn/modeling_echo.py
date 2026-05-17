@@ -1,12 +1,19 @@
-from typing import List, Optional, Tuple, Union
+from typing import TYPE_CHECKING, List, Optional, Tuple, Union
 
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from transformers import GenerationMixin, PreTrainedModel
-from transformers.modeling_outputs import CausalLMOutputWithPast
+from transformers.modeling_outputs import (
+    CausalLMOutputWithPast,
+    SequenceClassifierOutputWithPast,
+)
 
 from .configuration_echo import EchoConfig
+
+if TYPE_CHECKING:
+    # Force HF trust_remote_code AST parser to bundle triton_scan.py
+    pass
 
 try:
     from vllm.model_executor.models.transformers import ALL_ATTENTION_FUNCTIONS
@@ -1026,3 +1033,370 @@ class EchoForCausalLM(EchoPreTrainedModel, GenerationMixin):
             )
             reordered_past.append(reordered_layer_past)
         return reordered_past
+
+
+class EchoForSequenceClassification(EchoPreTrainedModel):
+    """
+    Echo-DSRN with a sequence-level classification head.
+
+    This model is the *terminal* form of a fine-tuned classifier: it exposes
+    only a ``classify()`` convenience method and a standard HF ``forward()``
+    that returns :class:`~transformers.modeling_outputs.SequenceClassifierOutputWithPast`.
+    It intentionally does **not** inherit :class:`~transformers.GenerationMixin` so
+    chat-completion endpoints cannot be used accidentally.
+
+    Typical construction path
+    -------------------------
+    1.  Load ``EchoForCausalLM`` + LoRA adapter via :func:`merge_and_export`
+        (see ``scripts/merge_clf_adapter.py``).
+    2.  The resulting merged weights are saved as ``EchoForSequenceClassification``
+        alongside a ``config.json`` that carries ``num_labels``, ``id2label``, and
+        ``label2id``.
+    3.  End-users load with::
+
+            from echo_dsrn import EchoForSequenceClassification
+            model = EchoForSequenceClassification.from_pretrained("your/hub-id")
+            label, probs = model.classify("some text")
+    """
+
+    # Do NOT add GenerationMixin — this model must not generate text.
+    main_input_name = "input_ids"
+
+    def __init__(self, config: EchoConfig):
+        super().__init__(config)
+        self.num_labels = getattr(config, "num_labels", 2)
+        self.model = EchoModel(config)
+
+        classifier_dropout = getattr(config, "classifier_dropout", 0.0)
+        self.dropout = nn.Dropout(classifier_dropout) if classifier_dropout > 0.0 else nn.Identity()
+        self.classifier = nn.Linear(config.embed_dim, self.num_labels, bias=True)
+
+        self.post_init()
+
+    # ------------------------------------------------------------------
+    # HF embedding hooks (required by PreTrainedModel)
+    # ------------------------------------------------------------------
+    def get_input_embeddings(self):
+        return self.model.embedding
+
+    def set_input_embeddings(self, value):
+        self.model.embedding = value
+
+    def _set_gradient_checkpointing(self, enable=True, gradient_checkpointing_func=None):
+        self.model._set_gradient_checkpointing(enable, gradient_checkpointing_func)
+
+    # ------------------------------------------------------------------
+    # Forward
+    # ------------------------------------------------------------------
+    def forward(
+        self,
+        input_ids: Optional[torch.LongTensor] = None,
+        attention_mask: Optional[torch.LongTensor] = None,
+        position_ids: Optional[torch.LongTensor] = None,
+        past_key_values: Optional[List[Tuple[torch.Tensor, torch.Tensor]]] = None,
+        inputs_embeds: Optional[torch.FloatTensor] = None,
+        labels: Optional[torch.LongTensor] = None,
+        use_cache: Optional[bool] = None,
+        output_hidden_states: Optional[bool] = None,
+        return_dict: Optional[bool] = None,
+        **kwargs,
+    ) -> Union[Tuple, SequenceClassifierOutputWithPast]:
+        """
+        Parameters
+        ----------
+        labels:
+            - ``num_labels == 1``: regression target (``torch.float``).
+            - ``num_labels > 1``, single integer per sample: cross-entropy class index.
+            - ``num_labels > 1``, float vector per sample: multi-label BCE.
+        """
+        return_dict = (
+            return_dict
+            if return_dict is not None
+            else getattr(self.config, "use_return_dict", True)
+        )
+
+        kwargs["position_ids"] = position_ids
+
+        model_out = self.model(
+            input_ids=input_ids,
+            past_key_values=past_key_values,
+            inputs_embeds=inputs_embeds,
+            **kwargs,
+        )
+
+        hidden_states = model_out[0]  # (B, T, D)
+        new_states = model_out[1]
+
+        # --- Pooling: last non-padding token ---
+        if attention_mask is not None:
+            # Find the index of the last 1 in each row of attention_mask
+            seq_lengths = attention_mask.sum(dim=1) - 1  # (B,)
+            seq_lengths = seq_lengths.clamp(min=0)
+        else:
+            # No mask: use the true last token
+            if input_ids is not None:
+                seq_lengths = torch.full(
+                    (hidden_states.size(0),),
+                    hidden_states.size(1) - 1,
+                    dtype=torch.long,
+                    device=hidden_states.device,
+                )
+            else:
+                seq_lengths = torch.full(
+                    (hidden_states.size(0),),
+                    hidden_states.size(1) - 1,
+                    dtype=torch.long,
+                    device=hidden_states.device,
+                )
+
+        # Gather last-token hidden states: (B, D)
+        pooled = hidden_states[
+            torch.arange(hidden_states.size(0), device=hidden_states.device), seq_lengths
+        ]
+        pooled = self.dropout(pooled)
+        logits = self.classifier(pooled)  # (B, num_labels)
+
+        # --- Loss ---
+        loss = None
+        if labels is not None:
+            if self.num_labels == 1:
+                # Regression
+                loss_fct = nn.MSELoss()
+                loss = loss_fct(logits.squeeze(-1), labels.float())
+            elif labels.dtype in (torch.float, torch.float16, torch.bfloat16):
+                # Multi-label binary classification
+                loss_fct = nn.BCEWithLogitsLoss()
+                loss = loss_fct(logits, labels.float())
+            else:
+                # Standard multi-class
+                loss_fct = nn.CrossEntropyLoss()
+                loss = loss_fct(logits.view(-1, self.num_labels), labels.view(-1))
+
+        if not return_dict:
+            output = (logits, new_states)
+            return ((loss,) + output) if loss is not None else output
+
+        return SequenceClassifierOutputWithPast(
+            loss=loss,
+            logits=logits,
+            past_key_values=new_states if use_cache else None,
+            hidden_states=None,
+            attentions=None,
+        )
+
+    # ------------------------------------------------------------------
+    # Convenience inference API
+    # ------------------------------------------------------------------
+    @torch.inference_mode()
+    def classify(
+        self,
+        text: str,
+        tokenizer,
+        device: Optional[str] = None,
+        return_probabilities: bool = True,
+    ) -> Tuple[str, Optional[torch.Tensor]]:
+        """
+        High-level classification helper.
+
+        Parameters
+        ----------
+        text:
+            Raw string to classify.
+        tokenizer:
+            A HuggingFace ``PreTrainedTokenizer`` compatible with the model.
+        device:
+            Optional device string (e.g. ``"cuda"``).  Defaults to the device
+            of the model's first parameter.
+        return_probabilities:
+            If ``True`` (default), also return a probability tensor (softmax
+            for multi-class, sigmoid for binary/multi-label).
+
+        Returns
+        -------
+        label : str
+            The predicted label string from ``config.id2label``.
+        probabilities : Tensor or None
+            Shape ``(num_labels,)`` probability vector, or ``None`` if
+            ``return_probabilities=False``.
+        """
+        if device is None:
+            try:
+                device = str(next(self.parameters()).device)
+            except StopIteration:
+                device = "cpu"
+
+        self.eval()
+
+        # Format text if baked-in templates exist
+        sys_prompt = getattr(self.config, "system_prompt", None)
+        usr_template = getattr(self.config, "user_template", None)
+
+        if sys_prompt and usr_template:
+            messages = [{"role": "system", "content": sys_prompt}]
+            messages.append({"role": "user", "content": usr_template.format(text=text)})
+            # Format using the tokenizer's chat template
+            try:
+                formatted_text = tokenizer.apply_chat_template(
+                    messages, add_generation_prompt=True, tokenize=False
+                )
+            except Exception:
+                formatted_text = text
+        else:
+            formatted_text = text
+
+        enc = tokenizer(formatted_text, return_tensors="pt", truncation=True)
+        enc = {k: v.to(device) for k, v in enc.items()}
+
+        output = self(**enc)
+        logits = output.logits  # (1, num_labels)
+
+        if self.num_labels == 1:
+            # Regression: return raw value
+            pred_label = str(logits.squeeze().item())
+            probs = None
+        elif self.num_labels == 2:
+            probs_t = torch.softmax(logits, dim=-1).squeeze(0) if return_probabilities else None
+            pred_id = int(logits.argmax(dim=-1).item())
+            pred_label = getattr(self.config, "id2label", {0: "0", 1: "1"}).get(
+                pred_id, str(pred_id)
+            )
+            probs = probs_t
+        else:
+            probs_t = torch.softmax(logits, dim=-1).squeeze(0) if return_probabilities else None
+            pred_id = int(logits.argmax(dim=-1).item())
+            pred_label = getattr(self.config, "id2label", {}).get(pred_id, str(pred_id))
+            probs = probs_t
+
+        return pred_label, probs
+
+    @classmethod
+    def from_causal_lm(
+        cls,
+        causal_lm_model,
+        num_labels: int = 2,
+        id2label: Optional[dict] = None,
+        label2id: Optional[dict] = None,
+        classifier_dropout: float = 0.0,
+        label_token_ids: Optional[List[int]] = None,
+        system_prompt: Optional[str] = None,
+        user_template: Optional[str] = None,
+    ) -> "EchoForSequenceClassification":
+        """
+        Construct an :class:`EchoForSequenceClassification` from a fully
+        merged :class:`EchoForCausalLM` instance (i.e. after LoRA weights
+        have been merged via ``peft.merge_adapter``).
+
+        The backbone weights are copied; the ``lm_head`` is discarded.
+
+        Classifier head initialisation
+        ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+        If ``label_token_ids`` is provided (one token ID per class), the
+        classifier weight rows are seeded directly from the corresponding
+        ``lm_head`` weight rows.  This is the correct initialisation for
+        **generative** adapters that were fine-tuned to emit a label token
+        (e.g. ``"0"`` or ``"1"``): the backbone already knows how to push
+        the last hidden state toward those tokens, so we preserve that signal
+        instead of starting from random.
+
+        Parameters
+        ----------
+        causal_lm_model:
+            A loaded (and optionally LoRA-merged) ``EchoForCausalLM`` instance.
+        num_labels:
+            Number of output classes.
+        id2label:
+            Optional mapping ``{int -> str}`` for label names.
+        label2id:
+            Optional reverse mapping ``{str -> int}``.
+        classifier_dropout:
+            Dropout probability before the classification head.
+        label_token_ids:
+            Optional list of ``num_labels`` token IDs.  When supplied, row
+            ``i`` of the ``lm_head`` weight matrix is copied into row ``i``
+            of the classifier weight matrix, seeding the head from the
+            causal model's learned token distributions.
+            Example for Echo-DSRN NSFW adapter::
+
+                label_token_ids=[29900, 29896]  # token IDs for "0" and "1"
+
+        Returns
+        -------
+        EchoForSequenceClassification
+        """
+        if id2label is None:
+            id2label = {i: str(i) for i in range(num_labels)}
+        if label2id is None:
+            label2id = {v: k for k, v in id2label.items()}
+
+        # Validate label_token_ids length
+        if label_token_ids is not None and len(label_token_ids) != num_labels:
+            raise ValueError(
+                f"label_token_ids has {len(label_token_ids)} entries but num_labels={num_labels}. "
+                "Must provide exactly one token ID per class."
+            )
+
+        # Clone config and inject classification fields
+        config = causal_lm_model.config
+        config.num_labels = num_labels
+        config.id2label = {int(k): v for k, v in id2label.items()}
+        config.label2id = label2id
+        config.classifier_dropout = classifier_dropout
+
+        if system_prompt is not None:
+            config.system_prompt = system_prompt
+        if user_template is not None:
+            config.user_template = user_template
+
+        # Carry dtype forward so save_pretrained serialises it correctly
+        if hasattr(causal_lm_model, "dtype"):
+            config.torch_dtype = str(causal_lm_model.dtype).replace("torch.", "")
+        # Update auto_map so Hub users get the right class on from_pretrained
+        config.auto_map = {
+            "AutoConfig": "configuration_echo.EchoConfig",
+            "AutoModel": "modeling_echo.EchoModel",
+            "AutoModelForSequenceClassification": ("modeling_echo.EchoForSequenceClassification"),
+        }
+
+        # Build the classifier wrapper
+        clf_model = cls(config)
+
+        # Copy backbone weights
+        backbone_sd = causal_lm_model.model.state_dict()
+        missing, unexpected = clf_model.model.load_state_dict(backbone_sd, strict=True)
+        if missing:
+            import warnings
+
+            warnings.warn(
+                f"EchoForSequenceClassification.from_causal_lm: "
+                f"missing backbone keys: {missing}",
+                UserWarning,
+            )
+        if unexpected:
+            import warnings
+
+            warnings.warn(
+                f"EchoForSequenceClassification.from_causal_lm: "
+                f"unexpected backbone keys: {unexpected}",
+                UserWarning,
+            )
+
+        # --- Seed classifier head from lm_head rows (generative adapter path) ---
+        if label_token_ids is not None:
+            lm_head_weight = causal_lm_model.lm_head.weight  # (vocab_size, embed_dim)
+            with torch.no_grad():
+                for label_idx, token_id in enumerate(label_token_ids):
+                    clf_model.classifier.weight[label_idx].copy_(lm_head_weight[token_id])
+                # Zero-init bias so initial scores are purely from the weight rows
+                torch.nn.init.zeros_(clf_model.classifier.bias)
+
+        # --- Cast entire model to the source dtype ---
+        # cls(config) initialises weights in float32 by default.
+        # We cast everything uniformly AFTER all weight copies so that both
+        # the backbone and the seeded classifier head end up in the same precision.
+        src_dtype = causal_lm_model.dtype  # e.g. torch.bfloat16
+        if src_dtype != torch.float32:
+            clf_model = clf_model.to(src_dtype)
+            # Persist in config using the current (non-deprecated) field name
+            config.dtype = str(src_dtype).replace("torch.", "")
+
+        return clf_model
