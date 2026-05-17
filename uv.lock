@@ -436,7 +436,7 @@ wheels = [
 
 [[package]]
 name = "echo-dsrn"
-version = "0.1.3b0"
+version = "0.1.3rc0"
 source = { editable = "." }
 dependencies = [
     { name = "click" },

@@ -1,6 +1,6 @@
 [project]
 name = "echo-dsrn"
-version = "0.1.3b"
+version = "0.1.3rc0"
 description = "Echo-DSRN: Surprise-Gated Dual-State Recurrent Architecture"
 readme = "README.md"
 requires-python = ">=3.10"
