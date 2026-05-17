@@ -264,6 +264,29 @@ class EchoForGenerativeClassification(EchoForCausalLM):
             self._build_label_cache(tokenizer)
         return self
 
+    @classmethod
+    def from_pretrained(cls, pretrained_model_name_or_path, *model_args, **kwargs):
+        """
+        Override from_pretrained to automatically load and bind the tokenizer
+        from the same checkpoint, so that forward() works out of the box when
+        loaded via pipeline() or AutoModelForSequenceClassification without a
+        manual set_tokenizer() call.
+        """
+        model = super().from_pretrained(pretrained_model_name_or_path, *model_args, **kwargs)
+        try:
+            from transformers import AutoTokenizer
+
+            tok = AutoTokenizer.from_pretrained(
+                pretrained_model_name_or_path,
+                trust_remote_code=kwargs.get("trust_remote_code", False),
+            )
+            model.set_tokenizer(tok)
+        except Exception:
+            # Best-effort: if tokenizer loading fails, the user can still call
+            # set_tokenizer() manually before running forward().
+            pass
+        return model
+
     # ------------------------------------------------------------------
     # High-level inference API
     # ------------------------------------------------------------------

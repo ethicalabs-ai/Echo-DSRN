@@ -16,6 +16,7 @@ if TYPE_CHECKING:
     pass
 
 try:
+    # pyrefly: ignore [missing-import]
     from vllm.model_executor.models.transformers import ALL_ATTENTION_FUNCTIONS
 except ImportError:
     ALL_ATTENTION_FUNCTIONS = {}
