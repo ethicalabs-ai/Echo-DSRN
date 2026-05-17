@@ -1,0 +1,146 @@
+# ─────────────────────────────────────────────────────────────────────────────
+# docker-compose.yml
+# Serve Echo-DSRN 114M and Echo-Hybrid 0.5B simultaneously via vLLM
+# (ROCm / AMD GPU)
+#
+# Prerequisites
+# ─────────────
+#   • Docker + docker-compose v2
+#   • ROCm runtime installed on the host
+#   • (Optional) HF_TOKEN in your shell or a .env file for gated models
+#
+# Quick start
+# ───────────
+#   docker compose build
+#   docker compose up
+#
+#   # Echo-DSRN OpenAI-compatible API:
+#   curl http://localhost:8000/v1/completions \
+#     -H "Content-Type: application/json" \
+#     -d '{"model":"echo-dsrn","prompt":"Hello, world","max_tokens":32}'
+#
+#   # Echo-Hybrid OpenAI-compatible API:
+#   curl http://localhost:8001/v1/completions \
+#     -H "Content-Type: application/json" \
+#     -d '{"model":"echo-hybrid","prompt":"Hello, world","max_tokens":32}'
+#
+# Serving local checkpoints
+# ─────────────────────────
+#   Set MODEL_PATH_DSRN / MODEL_PATH_HYBRID to the host-side checkpoint
+#   directories and uncomment the volume + model path overrides below.
+#
+# Environment overrides  (.env file or shell exports)
+# ────────────────────────────────────────────────────
+#   HF_TOKEN              HuggingFace token (needed for private/gated models)
+#   ROCR_VISIBLE_DEVICES  Comma-separated GPU indices (default: all)
+#   DSRN_GPU              GPU index for Echo-DSRN  (default: 0)
+#   HYBRID_GPU            GPU index for Echo-Hybrid (default: 0; set to 1 for
+#                         multi-GPU setups)
+#   DSRN_DTYPE            bfloat16 | float16 | auto   (default: bfloat16)
+#   HYBRID_DTYPE          bfloat16 | float16 | auto   (default: bfloat16)
+#   DSRN_GPU_MEM          Fraction of GPU memory vLLM may use (default: 0.45)
+#   HYBRID_GPU_MEM        Same for Hybrid service              (default: 0.45)
+# ─────────────────────────────────────────────────────────────────────────────
+
+x-rocm-common: &rocm-common
+  build:
+    context: .
+    dockerfile: Dockerfile.rocm
+  # ROCm device access — exposes all GPUs; restrict via ROCR_VISIBLE_DEVICES
+  devices:
+    - /dev/kfd
+    - /dev/dri
+  group_add:
+    - video
+    - render
+  # Shared memory required by ROCm's HSA runtime
+  ipc: host
+  security_opt:
+    - seccomp:unconfined
+  # Cache HF model weights on the host so they survive container restarts
+  volumes:
+    - hf-cache:/root/.cache/huggingface
+    # Uncomment to serve local checkpoints:
+    # - /path/to/local/echo-dsrn:/models/echo-dsrn:ro
+    # - /path/to/local/echo-hybrid:/models/echo-hybrid:ro
+  environment:
+    - HUGGING_FACE_HUB_TOKEN=${HF_TOKEN:-}
+    - HF_HUB_ENABLE_HF_TRANSFER=1
+  restart: unless-stopped
+
+services:
+
+  # ── Echo-DSRN 114M v0.1.2 ─────────────────────────────────────────────────
+  echo-dsrn:
+    <<: *rocm-common
+    container_name: echo-dsrn
+    ports:
+      - "8000:8000"
+    environment:
+      - HUGGING_FACE_HUB_TOKEN=${HF_TOKEN:-}
+      - HF_HUB_ENABLE_HF_TRANSFER=1
+      - ROCR_VISIBLE_DEVICES=${DSRN_GPU:-0}
+    command:
+      - --model
+      - ${DSRN_MODEL:-ethicalabs/Echo-DSRN-114M-v0.1.2}
+      - --served-model-name
+      - echo-dsrn
+      - --trust-remote-code
+      - --host
+      - "0.0.0.0"
+      - --port
+      - "8000"
+      - --dtype
+      - ${DSRN_DTYPE:-bfloat16}
+      - --gpu-memory-utilization
+      - ${DSRN_GPU_MEM:-0.45}
+      - --max-model-len
+      - "4096"
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 60s
+
+  # ── Echo-Hybrid 0.5B ───────────────────────────────────────────────────────
+  echo-hybrid:
+    <<: *rocm-common
+    container_name: echo-hybrid
+    ports:
+      - "8001:8001"
+    environment:
+      - HUGGING_FACE_HUB_TOKEN=${HF_TOKEN:-}
+      - HF_HUB_ENABLE_HF_TRANSFER=1
+      - ROCR_VISIBLE_DEVICES=${HYBRID_GPU:-0}
+    command:
+      - --model
+      - ${HYBRID_MODEL:-ethicalabs/Echo-Hybrid-0.5B}
+      - --served-model-name
+      - echo-hybrid
+      - --trust-remote-code
+      - --host
+      - "0.0.0.0"
+      - --port
+      - "8001"
+      - --dtype
+      - ${HYBRID_DTYPE:-bfloat16}
+      - --gpu-memory-utilization
+      - ${HYBRID_GPU_MEM:-0.45}
+      - --max-model-len
+      - "4096"
+      - --enable-auto-tool-choice
+      - --tool-call-parser
+      - hermes
+      - --chat-template
+      - /app/echo_dsrn/tool_chat_template.jinja
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8001/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 60s
+
+volumes:
+  hf-cache:
+    driver: local
