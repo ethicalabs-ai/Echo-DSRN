@@ -12,6 +12,7 @@ from typing import List, Optional, Tuple, Union
 
 import torch
 import torch.nn as nn
+from torch.utils.checkpoint import checkpoint as gradient_checkpoint
 from transformers import GenerationMixin
 from transformers.cache_utils import DynamicCache
 from transformers.modeling_outputs import CausalLMOutputWithPast
@@ -109,9 +110,27 @@ class HybridEchoModel(Qwen2PreTrainedModel):
                 is_bare_tensor = False
 
             h_prev, c_prev = self._dsrn_input_states[injector_idx]
-            x_out, h_new, c_new = self.memory_injectors[injector_idx](
-                hidden_states, h_prev, c_prev, eos_mask=self._eos_mask
-            )
+            injector = self.memory_injectors[injector_idx]
+            eos_mask = self._eos_mask
+
+            if self.gradient_checkpointing and self.training:
+                # Wrap the injector in a gradient checkpoint so its intermediate
+                # activations are discarded during the forward pass and recomputed
+                # per-injector during backward.  use_reentrant=False is required
+                # for compatibility with torch.compile and nested checkpointing.
+                def injector_fn(hs, h, c):
+                    return injector(hs, h, c, eos_mask=eos_mask)
+
+                x_out, h_new, c_new = gradient_checkpoint(
+                    injector_fn,
+                    hidden_states,
+                    h_prev,
+                    c_prev,
+                    use_reentrant=False,
+                )
+            else:
+                x_out, h_new, c_new = injector(hidden_states, h_prev, c_prev, eos_mask=eos_mask)
+
             self._dsrn_output_states.append((h_new, c_new))
             if is_bare_tensor:
                 return x_out
@@ -362,14 +381,23 @@ class HybridEchoForCausalLM(Qwen2PreTrainedModel, GenerationMixin):
             **kwargs,
         )
         hidden_states = outputs.last_hidden_state
+        # logits stays in the model dtype (bfloat16) — do NOT cast the full tensor
+        # to float32 here.  A global .float() materialises a second copy of
+        # [batch, seq, vocab_size] in fp32, retaining it in the autograd graph
+        # (+2.5 GiB at batch=2, seq=512 with vocab=151 936).  F.cross_entropy
+        # handles numerical stability internally via per-row log-sum-exp; the
+        # inline .float() cast below is fused into the cross-entropy kernel and
+        # never stored as a standalone tensor.
         logits = self.lm_head(hidden_states)
-        logits = logits.float()
         loss = None
         if labels is not None:
             shift_logits = logits[..., :-1, :].contiguous()
             shift_labels = labels[..., 1:].contiguous()
             loss_fct = nn.CrossEntropyLoss(ignore_index=-100)
-            loss = loss_fct(shift_logits.view(-1, self.config.vocab_size), shift_labels.view(-1))
+            loss = loss_fct(
+                shift_logits.view(-1, self.config.vocab_size).float(),  # fused cast
+                shift_labels.view(-1),
+            )
 
         if not return_dict:
             out = (logits,) + (outputs.past_key_values,)
