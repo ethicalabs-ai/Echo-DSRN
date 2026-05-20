@@ -348,6 +348,12 @@ class HybridEchoForCausalLM(Qwen2PreTrainedModel, GenerationMixin):
     def _set_gradient_checkpointing(self, enable=True, gradient_checkpointing_func=None):
         self.model.gradient_checkpointing = enable
         self.model.backbone.gradient_checkpointing = enable
+        if enable:
+            # Gradient checkpointing and the KV cache are mutually exclusive:
+            # GC discards activations between layers while the cache would
+            # re-materialise them, negating all memory savings.
+            self.config.use_cache = False
+            self.config.use_kv_cache = False
 
     def forward(
         self,
