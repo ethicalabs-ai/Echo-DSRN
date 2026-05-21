@@ -215,7 +215,12 @@ class HybridEchoModel(Qwen2PreTrainedModel):
             if past_key_values is None:
                 past_key_values = HybridEchoCache(config=self.config) if use_dsrn_cache else None
 
-        self._dsrn_input_states = dsrn_states  # ALWAYS run injectors regardless of cache mode.
+        # Detach DSRN states before carrying forward to the next step.
+        # Without .detach(), _dsrn_input_states holds tensors with grad_fn
+        # from the previous forward pass.  Step N+1's graph then includes
+        # step N's graph as a parent, preventing step N's activation tensors
+        # from being freed after backward — accumulating ~11.78 GiB per step.
+        self._dsrn_input_states = [(h.detach(), c.detach()) for h, c in dsrn_states]
         # use_dsrn_cache only gates whether output states are *returned* in the
         # HybridEchoCache.  Setting this to [] when use_cache=False (training mode)
         # caused the hook to exit early → injectors bypassed → grad_norm=0.
