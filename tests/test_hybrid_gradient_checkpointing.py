@@ -245,3 +245,166 @@ class TestGradientCheckpointing:
             "All DSRNMemoryInjector gradients are zero after backward() with GC enabled. "
             "The hook-based injection is likely detached from the autograd graph."
         )
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Chunked cross-entropy correctness
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+class TestChunkedCrossEntropy:
+    """Chunked CE must be numerically equivalent to single-pass CE and
+    must not introduce gradient errors or NaN/Inf under edge cases."""
+
+    @staticmethod
+    def _ref_loss(logits_flat: torch.Tensor, labels_flat: torch.Tensor) -> torch.Tensor:
+        """Single-pass reference: manual mean over non-ignored tokens."""
+        import torch.nn.functional as F
+
+        mask = labels_flat != -100
+        if mask.sum() == 0:
+            return torch.zeros((), dtype=torch.float32)
+        return (
+            F.cross_entropy(logits_flat[mask].float(), labels_flat[mask], reduction="sum")
+            / mask.sum().float()
+        )
+
+    def test_chunked_loss_matches_single_pass(self, tiny_hybrid):
+        """Chunked CE must equal single-pass CE to within float32 rounding."""
+        model = tiny_hybrid
+        model.train()
+        torch.manual_seed(42)
+        input_ids = torch.randint(0, VOCAB, (BATCH, SEQ))
+        labels = input_ids.clone()
+
+        out = model(input_ids=input_ids, labels=labels)
+        chunked_loss = out.loss.detach()
+
+        with torch.no_grad():
+            hidden = model.model(input_ids=input_ids, return_dict=True).last_hidden_state
+            logits = model.lm_head(hidden)
+        shift_logits = logits[..., :-1, :].reshape(-1, VOCAB).float()
+        shift_labels = labels[..., 1:].reshape(-1)
+        ref = self._ref_loss(shift_logits, shift_labels)
+
+        assert torch.allclose(chunked_loss, ref, atol=1e-4), (
+            f"Chunked loss {chunked_loss.item():.6f} != reference {ref.item():.6f} "
+            f"(diff={abs(chunked_loss.item() - ref.item()):.2e})"
+        )
+
+    def test_chunked_loss_all_ignored(self, tiny_hybrid):
+        """All-(-100) labels must return 0.0, not NaN or Inf."""
+        model = tiny_hybrid
+        model.train()
+        input_ids = torch.randint(0, VOCAB, (BATCH, SEQ))
+        labels = torch.full_like(input_ids, -100)
+
+        out = model(input_ids=input_ids, labels=labels)
+        assert torch.isfinite(out.loss), f"loss not finite with all-ignored labels: {out.loss}"
+        assert out.loss.item() == 0.0, f"Expected 0.0 for all-ignored labels, got {out.loss.item()}"
+
+    def test_chunked_loss_partial_ignore(self, tiny_hybrid):
+        """Loss is averaged only over non-ignored positions — must be finite."""
+        model = tiny_hybrid
+        model.train()
+        torch.manual_seed(7)
+        input_ids = torch.randint(0, VOCAB, (BATCH, SEQ))
+        labels = input_ids.clone()
+        labels[:, SEQ // 2 :] = -100
+
+        out = model(input_ids=input_ids, labels=labels)
+        assert torch.isfinite(out.loss), f"loss not finite with partial ignore: {out.loss}"
+
+    def test_chunked_loss_accumulator_is_float32(self, tiny_hybrid):
+        """The _total_loss accumulator must be float32, not bfloat16.
+
+        Previously new_zeros() inherited the bf16 dtype of _flat_logits, causing
+        silent precision loss on the first accumulation step.
+        """
+        model = tiny_hybrid.bfloat16()
+        model.train()
+        input_ids = torch.randint(0, VOCAB, (1, SEQ))
+        labels = input_ids.clone()
+
+        out = model(input_ids=input_ids, labels=labels)
+        assert out.loss.dtype == torch.float32, (
+            f"loss.dtype={out.loss.dtype}; expected float32. "
+            "The _total_loss accumulator may have been initialised as bfloat16."
+        )
+
+    def test_chunked_backward_gradients_flow(self, tiny_hybrid):
+        """Gradients must flow through every chunk back to lm_head weights."""
+        model = tiny_hybrid
+        model.train()
+        input_ids = torch.randint(0, VOCAB, (BATCH, SEQ))
+        labels = input_ids.clone()
+
+        out = model(input_ids=input_ids, labels=labels)
+        out.loss.backward()
+
+        grad = model.lm_head.weight.grad
+        assert grad is not None, "lm_head.weight.grad is None after backward()"
+        assert grad.abs().max() > 0, "lm_head.weight.grad is all-zero after backward()"
+
+    def test_chunked_backward_matches_singlepass_gradients(self, tiny_hybrid):
+        """Chunked CE gradient must equal single-pass CE on identical logits.
+
+        We test the CE math in isolation using raw float32 logit tensors so
+        the comparison is independent of the model recurrent state (DSRN hooks
+        advance the RNG and would cause hidden-state divergence between two
+        separate model forward passes).
+        """
+        import torch.nn.functional as F
+
+        N = BATCH * (SEQ - 1)
+        torch.manual_seed(99)
+        logits_c = torch.randn(N, VOCAB, requires_grad=True)
+        logits_r = logits_c.detach().clone().requires_grad_(True)
+        labels = torch.randint(0, VOCAB, (N,))
+        labels[::4] = -100  # inject ignored positions to test masking
+
+        # chunked path (mirrors the implementation exactly)
+        _CHUNK_SIZE = 4  # small to exercise multiple iterations
+        import torch.nn as nn
+
+        _loss_fct = nn.CrossEntropyLoss(ignore_index=-100, reduction="sum")
+        _total_loss = torch.zeros((), dtype=torch.float32)
+        _total_tokens = torch.zeros((), dtype=torch.long)
+        for _i in range(0, N, _CHUNK_SIZE):
+            _cl = logits_c[_i : _i + _CHUNK_SIZE].float()
+            _ll = labels[_i : _i + _CHUNK_SIZE]
+            _total_loss = _total_loss + _loss_fct(_cl, _ll)
+            _total_tokens = _total_tokens + (_ll != -100).sum()
+            del _cl
+        chunked_loss = _total_loss / _total_tokens.clamp(min=1)
+        chunked_loss.backward()
+
+        # single-pass reference
+        mask = labels != -100
+        ref_loss = (
+            F.cross_entropy(logits_r[mask].float(), labels[mask], reduction="sum")
+            / mask.sum().float()
+        )
+        ref_loss.backward()
+
+        assert torch.allclose(logits_c.grad, logits_r.grad, atol=1e-6), (
+            f"Chunked CE grad differs from single-pass CE grad. "
+            f"Max diff: {(logits_c.grad - logits_r.grad).abs().max().item():.2e}"
+        )
+
+    def test_chunked_ce_with_gc_enabled(self, tiny_hybrid):
+        """Chunked CE + gradient checkpointing must produce finite loss and gradients."""
+        model = tiny_hybrid
+        model.gradient_checkpointing_enable()
+        model.train()
+        input_ids = torch.randint(0, VOCAB, (BATCH, SEQ))
+        labels = input_ids.clone()
+
+        out = model(input_ids=input_ids, labels=labels)
+        assert torch.isfinite(out.loss), f"loss not finite with GC+chunked CE: {out.loss}"
+        out.loss.backward()
+
+        grad = model.lm_head.weight.grad
+        assert (
+            grad is not None and grad.abs().max() > 0
+        ), "No lm_head gradient with GC+chunked CE enabled."

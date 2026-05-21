@@ -387,23 +387,34 @@ class HybridEchoForCausalLM(Qwen2PreTrainedModel, GenerationMixin):
             **kwargs,
         )
         hidden_states = outputs.last_hidden_state
-        # logits stays in the model dtype (bfloat16) — do NOT cast the full tensor
-        # to float32 here.  A global .float() materialises a second copy of
-        # [batch, seq, vocab_size] in fp32, retaining it in the autograd graph
-        # (+2.5 GiB at batch=2, seq=512 with vocab=151 936).  F.cross_entropy
-        # handles numerical stability internally via per-row log-sum-exp; the
-        # inline .float() cast below is fused into the cross-entropy kernel and
-        # never stored as a standalone tensor.
+        # logits stays in the model dtype (bfloat16).  The float32 cast is
+        # deferred to the chunked cross-entropy loop below where it is applied
+        # to at most _CHUNK_SIZE positions at a time, keeping peak allocation
+        # to O(chunk_size × vocab_size) rather than O(batch × seq × vocab_size).
         logits = self.lm_head(hidden_states)
         loss = None
         if labels is not None:
             shift_logits = logits[..., :-1, :].contiguous()
             shift_labels = labels[..., 1:].contiguous()
-            loss_fct = nn.CrossEntropyLoss(ignore_index=-100)
-            loss = loss_fct(
-                shift_logits.view(-1, self.config.vocab_size).float(),  # fused cast
-                shift_labels.view(-1),
-            )
+
+            # Chunked cross-entropy — avoids materialising the full
+            # [batch*seq, vocab] float32 tensor all at once.
+            # At seq=2048, vocab=151936: full fp32 = 1.24 GiB which exceeds
+            # available VRAM headroom.  Processing _CHUNK_SIZE positions per
+            # iteration keeps the peak allocation to ~311 MiB per chunk.
+            _CHUNK_SIZE = 512
+            _flat_logits = shift_logits.view(-1, self.config.vocab_size)
+            _flat_labels = shift_labels.view(-1)
+            _loss_fct = nn.CrossEntropyLoss(ignore_index=-100, reduction="sum")
+            _total_loss = torch.zeros((), dtype=torch.float32, device=_flat_logits.device)
+            _total_tokens = _flat_logits.new_zeros((), dtype=torch.long)
+            for _i in range(0, _flat_logits.size(0), _CHUNK_SIZE):
+                _cl = _flat_logits[_i : _i + _CHUNK_SIZE].float()
+                _ll = _flat_labels[_i : _i + _CHUNK_SIZE]
+                _total_loss = _total_loss + _loss_fct(_cl, _ll)
+                _total_tokens = _total_tokens + (_ll != -100).sum()
+                del _cl
+            loss = _total_loss / _total_tokens.clamp(min=1)
 
         if not return_dict:
             out = (logits,) + (outputs.past_key_values,)
