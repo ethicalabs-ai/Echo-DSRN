@@ -1,0 +1,39 @@
+name: python-ci
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+jobs:
+  uv-example:
+    name: python
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v6
+
+      - name: Install CPU torch (override ROCm wheels from lockfile)
+        # The lockfile pins ROCm wheels for linux (sys_platform == 'linux').
+        # We pre-install the CPU builds here so uv sync finds them satisfied.
+        run: |
+          uv pip install --system \
+            torch torchvision torchaudio \
+            --index-url https://download.pytorch.org/whl/cpu
+
+      - name: Install the project
+        run: uv sync --locked --dev --index-strategy=unsafe-best-match
+
+      - name: Run unit tests (no Hub / no local models)
+        run: uv run pytest -m "not integration and not local_model" --cov-report=xml:coverage.xml
+
+      - name: Upload coverage to Codecov
+        uses: codecov/codecov-action@v5
+        with:
+          files: coverage.xml
+          # Token is optional for public repos; add CODECOV_TOKEN secret when going public
+          token: ${{ secrets.CODECOV_TOKEN }}
+          fail_ci_if_error: false
