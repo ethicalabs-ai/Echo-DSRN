@@ -22,7 +22,7 @@ jobs:
         run: uv sync --dev --extra cpu --index-strategy=unsafe-best-match
 
       - name: Run unit tests (no Hub / no local models)
-        run: uv run pytest -m "not integration and not local_model" --cov-report=xml:coverage.xml
+        run: uv run --extra cpu pytest -m "not integration and not local_model" --cov-report=xml:coverage.xml
 
       - name: Upload coverage to Codecov
         uses: codecov/codecov-action@v5
