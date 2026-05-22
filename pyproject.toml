@@ -1,6 +1,6 @@
 [project]
 name = "echo-dsrn"
-version = "0.1.3rc2"
+version = "0.1.3rc3"
 description = "Echo-DSRN: Surprise-Gated Dual-State Recurrent Architecture"
 readme = "README.md"
 requires-python = ">=3.10"
@@ -28,6 +28,7 @@ packages = ["echo_dsrn", "echo_hybrid"]
 [dependency-groups]
 dev = [
     "pytest>=9.0.2",
+    "pytest-cov>=7.1.0",
 ]
 rocm = [
     "bitsandbytes>=0.46.1",
@@ -37,7 +38,7 @@ rocm = [
 
 [[tool.uv.index]]
 name = "pytorch-rocm"
-url = "https://download.pytorch.org/whl/rocm7.1/"
+url = "https://download.pytorch.org/whl/rocm7.2/"
 explicit = true
 
 [tool.uv.sources]
@@ -59,15 +60,43 @@ torchaudio = [
 triton = [
     { index = "pytorch-rocm", marker = "sys_platform == 'linux'" },
 ]
-# vLLM ROCm pre-built wheels — pip install vllm --index-url https://download.pytorch.org/whl/rocm7.1
+# vLLM ROCm pre-built wheels — pip install vllm --index-url https://download.pytorch.org/whl/rocm7.2
 # uv cannot pull these automatically because vllm is not on that index;
-# install separately: pip install vllm --extra-index-url https://download.pytorch.org/whl/rocm7.1
+# install separately: pip install vllm --extra-index-url https://download.pytorch.org/whl/rocm7.2
 
 [tool.uv]
 prerelease = "allow"
 
 # [tool.uv.extra-build-dependencies]
 # flash-attn = ["torch", "packaging", "ninja"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "--cov=echo_dsrn --cov=echo_hybrid --cov-report=term-missing --cov-report=html:htmlcov"
+filterwarnings = [
+    # huggingface_hub xet download API churn — third-party, not actionable by us
+    "ignore:hf_xet.download_files\\(\\) is deprecated:DeprecationWarning",
+    # torch.jit.script_method used internally by GRUCell — not actionable by us
+    "ignore:`torch.jit.script_method` is deprecated:DeprecationWarning",
+]
+markers = [
+    "integration: downloads Hub weights — requires network access (deselect with '-m not integration')",
+    "local_model: requires locally merged model files under models/ — not available in CI",
+]
+
+[tool.coverage.run]
+source = ["echo_dsrn", "echo_hybrid"]
+omit = ["*/triton_scan.py"]  # Triton kernels are not importable on CPU-only CI
+
+[tool.coverage.report]
+show_missing = true
+skip_covered = false
+exclude_lines = [
+    "pragma: no cover",
+    "if TYPE_CHECKING:",
+    "raise NotImplementedError",
+    "if __name__ == .__main__.:",
+]
 
 [tool.black]
 line-length = 100

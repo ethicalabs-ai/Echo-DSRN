@@ -8,6 +8,12 @@ pipeline() API, using pre-formatted inputs with the baked chat templates.
 import pytest
 from transformers import AutoTokenizer, pipeline
 
+pytestmark = [
+    pytest.mark.integration,
+    pytest.mark.local_model,  # requires merged models under models/ (not in git)
+]
+
+
 # ---------------------------------------------------------------------------
 # Fixtures
 # ---------------------------------------------------------------------------
