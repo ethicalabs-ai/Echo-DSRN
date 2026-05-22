@@ -13,9 +13,23 @@ dependencies = [
     "transformers==5.2.0",
     "trl>=0.25.1",
     "wandb>=0.16.0",
+]
+
+[project.optional-dependencies]
+# CPU-only build — used in CI (uv sync --extra cpu)
+cpu = [
     "torch>=2.10.0",
     "torchvision>=0.25.0",
     "torchaudio>=2.10.0",
+]
+# ROCm build — used locally (uv sync --extra rocm)
+rocm = [
+    "torch>=2.10.0",
+    "torchvision>=0.25.0",
+    "torchaudio>=2.10.0",
+    "bitsandbytes>=0.46.1",
+    "pytorch-triton-rocm",
+    "triton-rocm",
 ]
 
 [build-system]
@@ -30,42 +44,45 @@ dev = [
     "pytest>=9.0.2",
     "pytest-cov>=7.1.0",
 ]
-rocm = [
-    "bitsandbytes>=0.46.1",
-    "pytorch-triton-rocm",
-    "triton-rocm",
-]
 
 [[tool.uv.index]]
 name = "pytorch-rocm"
 url = "https://download.pytorch.org/whl/rocm7.2/"
 explicit = true
 
+[[tool.uv.index]]
+name = "pytorch-cpu"
+url = "https://download.pytorch.org/whl/cpu"
+explicit = true
+
 [tool.uv.sources]
-pytorch-triton-rocm = [
-    { index = "pytorch-rocm", marker = "sys_platform == 'linux'" },
-]
-triton-rocm = [
-    { index = "pytorch-rocm", marker = "sys_platform == 'linux'" },
-]
+# ROCm extra routes torch packages to the ROCm wheel index
 torch = [
-    { index = "pytorch-rocm", marker = "sys_platform == 'linux'" },
+    { index = "pytorch-rocm", extra = "rocm" },
+    { index = "pytorch-cpu",  extra = "cpu"  },
 ]
 torchvision = [
-    { index = "pytorch-rocm", marker = "sys_platform == 'linux'" },
+    { index = "pytorch-rocm", extra = "rocm" },
+    { index = "pytorch-cpu",  extra = "cpu"  },
 ]
 torchaudio = [
-    { index = "pytorch-rocm", marker = "sys_platform == 'linux'" },
+    { index = "pytorch-rocm", extra = "rocm" },
+    { index = "pytorch-cpu",  extra = "cpu"  },
 ]
-triton = [
-    { index = "pytorch-rocm", marker = "sys_platform == 'linux'" },
-]
-# vLLM ROCm pre-built wheels — pip install vllm --index-url https://download.pytorch.org/whl/rocm7.2
-# uv cannot pull these automatically because vllm is not on that index;
-# install separately: pip install vllm --extra-index-url https://download.pytorch.org/whl/rocm7.2
+pytorch-triton-rocm = { index = "pytorch-rocm" }
+triton-rocm         = { index = "pytorch-rocm" }
+triton              = { index = "pytorch-rocm" }
+# vLLM ROCm pre-built wheels — install separately:
+# pip install vllm --extra-index-url https://download.pytorch.org/whl/rocm7.2
 
 [tool.uv]
 prerelease = "allow"
+conflicts = [
+    [
+        { extra = "cpu" },
+        { extra = "rocm" },
+    ],
+]
 
 # [tool.uv.extra-build-dependencies]
 # flash-attn = ["torch", "packaging", "ninja"]

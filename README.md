@@ -45,11 +45,11 @@ This repository uses [uv](https://github.com/astral-sh/uv) for lightning-fast de
 git clone https://github.com/ethicalabs-ai/Echo-DSRN.git
 cd Echo-DSRN-HF
 
-# Install dependencies for local development
-uv sync
+# ROCm (local development — AMD GPU, ROCm 7.2+)
+uv sync --extra rocm
 
-# For AMD ROCm support (Requires ROCm 7.2 on your system, works on Strix Halo as well)
-uv sync --group rocm
+# CPU-only (CI, inference without GPU, or non-ROCm machines)
+uv sync --extra cpu
 ```
 
 ## Quick Start (Inference)

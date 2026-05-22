@@ -16,22 +16,10 @@ jobs:
       - name: Install uv
         uses: astral-sh/setup-uv@v6
 
-      - name: Create virtual environment
-        run: uv venv
-
-      - name: Install CPU torch (override ROCm wheels from lockfile)
-        # The lockfile pins ROCm wheels for linux (sys_platform == 'linux').
-        # We install CPU builds into the uv-managed venv before uv sync runs,
-        # so the resolver sees torch as already satisfied.
-        run: |
-          uv pip install \
-            torch torchvision torchaudio \
-            --index-url https://download.pytorch.org/whl/cpu
-
       - name: Install the project
-        # --no-locked: lockfile pins ROCm wheel hashes; CPU torch is already
-        # installed above so uv will treat it as satisfied and skip re-downloading.
-        run: uv sync --dev --index-strategy=unsafe-best-match
+        # --extra cpu routes torch/torchvision/torchaudio to the pytorch-cpu index.
+        # Without this, uv would pull the 5.8 GiB ROCm wheels from pytorch-rocm.
+        run: uv sync --dev --extra cpu --index-strategy=unsafe-best-match
 
       - name: Run unit tests (no Hub / no local models)
         run: uv run pytest -m "not integration and not local_model" --cov-report=xml:coverage.xml
@@ -40,6 +28,4 @@ jobs:
         uses: codecov/codecov-action@v5
         with:
           files: coverage.xml
-          # Token is optional for public repos; add CODECOV_TOKEN secret when going public
-          token: ${{ secrets.CODECOV_TOKEN }}
           fail_ci_if_error: false
