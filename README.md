@@ -5,7 +5,6 @@
 [![Paper](https://img.shields.io/badge/Paper-Working_Paper-green.svg)](PAPER.md)
 [![Model Collection](https://img.shields.io/badge/Echo--DSRN-HuggingFace-yellow.svg)](https://huggingface.co/collections/ethicalabs/echo-dsrn)
 [![Hybrid Collection](https://img.shields.io/badge/Echo--Hybrid-HuggingFace-yellow.svg)](https://huggingface.co/collections/ethicalabs/echo-dsrn-hybrid)
-[![codecov](https://codecov.io/gh/ethicalabs-ai/Echo-DSRN/graph/badge.svg)](https://codecov.io/gh/ethicalabs-ai/Echo-DSRN)
 
 **Echo-DSRN** is a hybrid recurrent architecture designed for resource-constrained deployment on narrow, well-defined tasks (e.g., intent routing, NER, semantic classification).
 

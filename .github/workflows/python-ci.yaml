@@ -24,9 +24,9 @@ jobs:
       - name: Run unit tests (no Hub / no local models)
         run: uv run --extra cpu pytest -m "not integration and not local_model" --cov-report=xml:coverage.xml
 
-      - name: Upload coverage to Codecov
-        uses: codecov/codecov-action@v5
-        with:
-          files: coverage.xml
-          token: ${{ secrets.CODECOV_TOKEN }}
-          fail_ci_if_error: false
+      # - name: Upload coverage to Codecov
+      #   uses: codecov/codecov-action@v5
+      #   with:
+      #     files: coverage.xml
+      #     token: ${{ secrets.CODECOV_TOKEN }}
+      #     fail_ci_if_error: false
