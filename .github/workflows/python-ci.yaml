@@ -16,16 +16,22 @@ jobs:
       - name: Install uv
         uses: astral-sh/setup-uv@v6
 
+      - name: Create virtual environment
+        run: uv venv
+
       - name: Install CPU torch (override ROCm wheels from lockfile)
         # The lockfile pins ROCm wheels for linux (sys_platform == 'linux').
-        # We pre-install the CPU builds here so uv sync finds them satisfied.
+        # We install CPU builds into the uv-managed venv before uv sync runs,
+        # so the resolver sees torch as already satisfied.
         run: |
-          uv pip install --system \
+          uv pip install \
             torch torchvision torchaudio \
             --index-url https://download.pytorch.org/whl/cpu
 
       - name: Install the project
-        run: uv sync --locked --dev --index-strategy=unsafe-best-match
+        # --no-locked: lockfile pins ROCm wheel hashes; CPU torch is already
+        # installed above so uv will treat it as satisfied and skip re-downloading.
+        run: uv sync --dev --index-strategy=unsafe-best-match
 
       - name: Run unit tests (no Hub / no local models)
         run: uv run pytest -m "not integration and not local_model" --cov-report=xml:coverage.xml
