@@ -37,6 +37,8 @@ sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")
 import echo_dsrn  # noqa: F401 — triggers AutoClass registrations
 from echo_dsrn.modeling_echo import EchoForSequenceClassification
 
+pytestmark = pytest.mark.integration  # requires Hub weights (base model + PEFT adapter)
+
 # ---------------------------------------------------------------------------
 # Hub identifiers
 # ---------------------------------------------------------------------------

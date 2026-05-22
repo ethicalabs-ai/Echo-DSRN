@@ -24,6 +24,8 @@ from transformers import (
 import echo_dsrn  # noqa: F401  # registers EchoConfig with AutoClass
 from echo_dsrn.modeling_generative_clf import EchoForGenerativeClassification
 
+pytestmark = pytest.mark.integration  # requires Hub weights (base model + PEFT adapter)
+
 # ---------------------------------------------------------------------------
 # Constants
 # ---------------------------------------------------------------------------

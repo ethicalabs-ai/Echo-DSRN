@@ -7,10 +7,13 @@ Integration tests to explicitly check batching behavior and padding corruption.
 import os
 import sys
 
+import pytest
 import torch
 
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 import echo_dsrn  # noqa: F401
+
+pytestmark = pytest.mark.integration  # requires Hub weights via conftest nsfw_clf_model
 
 # Import existing fixtures to avoid redefining the whole download/merge pipeline
 

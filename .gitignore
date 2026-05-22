@@ -24,6 +24,13 @@ wandb/
 temp/
 experiments/
 
+# Coverage
+.coverage
+.coverage.*
+htmlcov/
+coverage.xml
+.pytest_cache/
+
 # Excluded for now
 training/
 datasets/
