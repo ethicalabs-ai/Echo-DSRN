@@ -5,6 +5,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 from transformers import GenerationMixin, PreTrainedModel
 from transformers.modeling_outputs import (
+    BaseModelOutputWithPast,
     CausalLMOutputWithPast,
     SequenceClassifierOutputWithPast,
 )
@@ -742,8 +743,17 @@ class EchoModel(EchoPreTrainedModel):
         inputs_embeds: Optional[torch.FloatTensor] = None,
         position_ids: Optional[torch.LongTensor] = None,
         output_dsrn_telemetry: Optional[bool] = False,
+        output_attentions: Optional[bool] = None,
+        output_hidden_states: Optional[bool] = None,
+        return_dict: Optional[bool] = None,
         **kwargs,
-    ) -> Tuple[torch.Tensor, List[Tuple[torch.Tensor, torch.Tensor]]]:
+    ) -> Union[Tuple, BaseModelOutputWithPast]:
+
+        return_dict = (
+            return_dict
+            if return_dict is not None
+            else getattr(self.config, "use_return_dict", True)
+        )
 
         if input_ids is not None and inputs_embeds is not None:
             raise ValueError("You cannot specify both input_ids and inputs_embeds at the same time")
@@ -818,10 +828,19 @@ class EchoModel(EchoPreTrainedModel):
         elif EchoCache is not None:
             next_states = EchoCache(next_states)
 
-        if output_dsrn_telemetry:
-            return x, next_states, all_c_states, all_gate_stats
+        # Revert to raw tuple outputs if return_dict=False is requested
+        if not return_dict:
+            if output_dsrn_telemetry:
+                return x, next_states, all_c_states, all_gate_stats
+            return x, next_states
 
-        return x, next_states
+        # Standard HF Object wrapper containing last_hidden_state
+        return BaseModelOutputWithPast(
+            last_hidden_state=x,
+            past_key_values=next_states,
+            hidden_states=(x,) if output_hidden_states else None,
+            attentions=None,
+        )
 
 
 class EchoForCausalLM(EchoPreTrainedModel, GenerationMixin):
@@ -935,21 +954,32 @@ class EchoForCausalLM(EchoPreTrainedModel, GenerationMixin):
         # Pass position_ids explicitly alongside **kwargs
         kwargs["position_ids"] = position_ids
 
+        # Call the base EchoModel
         model_out = self.model(
             input_ids=input_ids,
             past_key_values=past_key_values,
             inputs_embeds=inputs_embeds,
             output_dsrn_telemetry=output_dsrn_telemetry,
+            output_attentions=output_attentions,
+            output_hidden_states=output_hidden_states,
+            return_dict=return_dict,  # Pass return_dict explicitly
             **kwargs,
         )
 
-        hidden_states = model_out[0]
-        new_states = model_out[1]
+        # Handle BaseModelOutputWithPast or raw tuple output gracefully
+        if hasattr(model_out, "last_hidden_state"):
+            hidden_states = model_out.last_hidden_state
+            new_states = model_out.past_key_values
+        else:
+            hidden_states = model_out[0]
+            new_states = model_out[1]
 
-        if len(model_out) > 2:
+        # Extract telemetry if model returned raw tuple (or via custom properties)
+        if isinstance(model_out, tuple) and len(model_out) > 2:
             self._latest_c_states = model_out[2]
             self._latest_gate_stats = model_out[3]
 
+        # Project using Causal LM head
         logits = self.lm_head(hidden_states)
 
         loss = None
@@ -968,8 +998,8 @@ class EchoForCausalLM(EchoPreTrainedModel, GenerationMixin):
             loss=loss,
             logits=logits,
             past_key_values=new_states if use_cache else None,
-            hidden_states=None,  # EchoModel doesn't expose internal states yet
-            attentions=None,  # EchoModel doesn't expose attention weights yet
+            hidden_states=(hidden_states,) if output_hidden_states else None,
+            attentions=None,
         )
 
     def prepare_inputs_for_generation(

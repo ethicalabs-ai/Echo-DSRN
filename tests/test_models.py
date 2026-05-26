@@ -176,3 +176,84 @@ def test_mlp_bias_true_roundtrip():
 
     # 2 layers × 2 projections (mlp_up + mlp_down) = 4 bias tensors expected.
     assert bias_count == 4, f"Expected 4 MLP bias tensors, found {bias_count}"
+
+
+def test_echo_return_dict_support(tiny_echo_dsrn):
+    """Test that return_dict=True and return_dict=False behave correctly in EchoModel and EchoForCausalLM."""
+    from transformers.modeling_outputs import (
+        BaseModelOutputWithPast,
+        CausalLMOutputWithPast,
+    )
+
+    causal_model = tiny_echo_dsrn
+    base_model = causal_model.model
+    batch_size = 2
+    seq_len = 8
+    input_ids = torch.randint(0, 1000, (batch_size, seq_len))
+
+    # --- Test 1: EchoModel with return_dict=True ---
+    out_dict = base_model(input_ids=input_ids, return_dict=True)
+    assert isinstance(out_dict, BaseModelOutputWithPast)
+    assert out_dict.last_hidden_state.shape == (batch_size, seq_len, base_model.embed_dim)
+    assert out_dict.past_key_values is not None
+    assert out_dict.hidden_states is None
+
+    # --- Test 2: EchoModel with return_dict=False ---
+    out_tuple = base_model(input_ids=input_ids, return_dict=False)
+    assert isinstance(out_tuple, tuple)
+    assert len(out_tuple) == 2
+    assert out_tuple[0].shape == (batch_size, seq_len, base_model.embed_dim)
+
+    # --- Test 3: EchoModel with output_hidden_states=True ---
+    out_hs = base_model(input_ids=input_ids, return_dict=True, output_hidden_states=True)
+    assert isinstance(out_hs, BaseModelOutputWithPast)
+    assert out_hs.hidden_states is not None
+    assert len(out_hs.hidden_states) == 1
+    assert out_hs.hidden_states[0].shape == (batch_size, seq_len, base_model.embed_dim)
+
+    # --- Test 4: EchoForCausalLM with return_dict=True ---
+    causal_out_dict = causal_model(input_ids=input_ids, return_dict=True)
+    assert isinstance(causal_out_dict, CausalLMOutputWithPast)
+    assert causal_out_dict.logits.shape == (batch_size, seq_len, causal_model.config.vocab_size)
+    assert causal_out_dict.past_key_values is not None
+    assert causal_out_dict.hidden_states is None
+
+    # --- Test 5: EchoForCausalLM with return_dict=False ---
+    causal_out_tuple = causal_model(input_ids=input_ids, return_dict=False)
+    assert isinstance(causal_out_tuple, tuple)
+    # Without labels, it should return (logits, past_key_values)
+    assert len(causal_out_tuple) == 2
+    assert causal_out_tuple[0].shape == (batch_size, seq_len, causal_model.config.vocab_size)
+
+    # --- Test 6: EchoForCausalLM with output_hidden_states=True ---
+    causal_out_hs = causal_model(input_ids=input_ids, return_dict=True, output_hidden_states=True)
+    assert isinstance(causal_out_hs, CausalLMOutputWithPast)
+    assert causal_out_hs.hidden_states is not None
+    assert len(causal_out_hs.hidden_states) == 1
+    assert causal_out_hs.hidden_states[0].shape == (batch_size, seq_len, base_model.embed_dim)
+
+
+def test_trl_chunked_nll_compatibility(tiny_echo_dsrn):
+    """
+    Verify compatibility with SFTTrainer's chunked_nll flow.
+    TRL intercepts outputs of the base model or causal LM to get last_hidden_state
+    and computes chunked cross-entropy.
+    """
+    model = tiny_echo_dsrn
+    batch_size = 2
+    seq_len = 8
+    input_ids = torch.randint(0, 1000, (batch_size, seq_len))
+
+    # 1. Base model must return an object with 'last_hidden_state' attribute
+    base_outputs = model.model(input_ids=input_ids, return_dict=True)
+    assert hasattr(base_outputs, "last_hidden_state")
+    assert base_outputs.last_hidden_state is not None
+    assert base_outputs.last_hidden_state.shape == (batch_size, seq_len, model.model.embed_dim)
+
+    # 2. Causal LM model must expose 'hidden_states' in its return_dict output
+    # (used by some trainers to extract intermediate representations)
+    causal_outputs = model(input_ids=input_ids, return_dict=True, output_hidden_states=True)
+    assert hasattr(causal_outputs, "hidden_states")
+    assert causal_outputs.hidden_states is not None
+    assert len(causal_outputs.hidden_states) == 1
+    assert causal_outputs.hidden_states[0].shape == base_outputs.last_hidden_state.shape
