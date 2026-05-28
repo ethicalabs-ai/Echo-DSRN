@@ -13,6 +13,8 @@ Usage
     python scratch/merge_intent_gen_clf.py --dtype float16
 """
 
+import json
+import os
 import shutil
 import sys
 from pathlib import Path
@@ -26,6 +28,43 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 
 import echo_dsrn  # noqa: F401
 from echo_dsrn.modeling_generative_clf import EchoForGenerativeClassification
+
+# ---------------------------------------------------------------------------
+# Helpers
+# ---------------------------------------------------------------------------
+
+
+def _patch_imports(output_dir: Path) -> None:
+    """Rewrite absolute package imports → relative imports in all copied .py files."""
+    replacements = {
+        "from echo_dsrn.": "from .",
+    }
+    for fname in os.listdir(output_dir):
+        if not fname.endswith(".py"):
+            continue
+        fpath = output_dir / fname
+        with open(fpath, "r", encoding="utf-8") as f:
+            src = f.read()
+        patched = src
+        for old, new in replacements.items():
+            patched = patched.replace(old, new)
+
+        # Post-copy patch to force HF dynamic module parser to copy triton_scan and utils
+        if fname == "modeling_generative_clf.py":
+            old_block = "if typing.TYPE_CHECKING:\n    # Force HF trust_remote_code to bundle nested dependencies\n    pass"
+            new_block = "if typing.TYPE_CHECKING:\n    # Force HF trust_remote_code to bundle nested dependencies\n    from .triton_scan import triton_dsrn_parallel_scan\n    from .utils import rms_norm_fn"
+            patched = patched.replace(old_block, new_block)
+
+        if fname == "modeling_echo.py":
+            old_block = "if TYPE_CHECKING:\n    # Force HF trust_remote_code AST parser to bundle triton_scan.py\n    pass"
+            new_block = "if TYPE_CHECKING:\n    # Force HF trust_remote_code AST parser to bundle triton_scan.py and utils.py\n    from .triton_scan import triton_dsrn_parallel_scan\n    from .utils import rms_norm_fn"
+            patched = patched.replace(old_block, new_block)
+
+        if patched != src:
+            with open(fpath, "w", encoding="utf-8") as f:
+                f.write(patched)
+            print(f"  ✓ Patched imports in {fname}")
+
 
 # ---------------------------------------------------------------------------
 # Canonical MASSIVE intent ordering
@@ -212,6 +251,23 @@ def main(base, adapter, output, dtype, smoke_test):
             raise FileNotFoundError(f"Required source file missing: {src}")
         shutil.copy(src, output_path / name)
         print(f"  copied {name}")
+
+    # Patch absolute imports to relative and inject dynamic module AST bundling code
+    _patch_imports(output_path)
+
+    # Register dynamic auto_maps in config.json
+    config_path = output_path / "config.json"
+    if config_path.exists():
+        with open(config_path) as f:
+            cfg = json.load(f)
+        cfg["auto_map"] = {
+            "AutoConfig": "configuration_echo.EchoConfig",
+            "AutoModelForCausalLM": "modeling_echo.EchoForCausalLM",
+            "AutoModelForSequenceClassification": "modeling_generative_clf.EchoForGenerativeClassification",
+        }
+        with open(config_path, "w") as f:
+            json.dump(cfg, f, indent=2)
+        print("  ✓ Registered HF auto_map configurations")
 
     # Generate Model Card
     readme_content = f"""---

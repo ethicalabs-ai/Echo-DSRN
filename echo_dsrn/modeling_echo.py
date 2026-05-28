@@ -1066,6 +1066,14 @@ class EchoForCausalLM(EchoPreTrainedModel, GenerationMixin):
         return reordered_past
 
 
+class EchoClassifier(nn.Linear):
+    def forward(self, input: torch.Tensor) -> torch.Tensor:
+        res = super().forward(input)
+        if res.ndim == 3 and res.size(1) == 1:
+            res = res.squeeze(1)
+        return res
+
+
 class EchoForSequenceClassification(EchoPreTrainedModel):
     """
     Echo-DSRN with a sequence-level classification head.
@@ -1100,7 +1108,8 @@ class EchoForSequenceClassification(EchoPreTrainedModel):
 
         classifier_dropout = getattr(config, "classifier_dropout", 0.0)
         self.dropout = nn.Dropout(classifier_dropout) if classifier_dropout > 0.0 else nn.Identity()
-        self.classifier = nn.Linear(config.embed_dim, self.num_labels, bias=True)
+        self.classifier = EchoClassifier(config.embed_dim, self.num_labels, bias=True)
+        self.score = self.classifier
 
         self.post_init()
 
