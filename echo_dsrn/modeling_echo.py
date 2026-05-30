@@ -835,12 +835,16 @@ class EchoModel(EchoPreTrainedModel):
             return x, next_states
 
         # Standard HF Object wrapper containing last_hidden_state
-        return BaseModelOutputWithPast(
+        output_obj = BaseModelOutputWithPast(
             last_hidden_state=x,
             past_key_values=next_states,
             hidden_states=(x,) if output_hidden_states else None,
             attentions=None,
         )
+        if output_dsrn_telemetry:
+            output_obj.all_c_states = all_c_states
+            output_obj.all_gate_stats = all_gate_stats
+        return output_obj
 
 
 class EchoForCausalLM(EchoPreTrainedModel, GenerationMixin):
@@ -893,6 +897,8 @@ class EchoForCausalLM(EchoPreTrainedModel, GenerationMixin):
         super().__init__(config)
         self.model = EchoModel(config)
         self.lm_head = nn.Linear(config.embed_dim, config.vocab_size, bias=False)
+        self._latest_c_states = None
+        self._latest_gate_stats = None
 
         # Initialize weights and apply final processing
         self.post_init()
@@ -975,7 +981,10 @@ class EchoForCausalLM(EchoPreTrainedModel, GenerationMixin):
             new_states = model_out[1]
 
         # Extract telemetry if model returned raw tuple (or via custom properties)
-        if isinstance(model_out, tuple) and len(model_out) > 2:
+        if hasattr(model_out, "all_c_states"):
+            self._latest_c_states = model_out.all_c_states
+            self._latest_gate_stats = model_out.all_gate_stats
+        elif isinstance(model_out, tuple) and len(model_out) > 2:
             self._latest_c_states = model_out[2]
             self._latest_gate_stats = model_out[3]
 
@@ -1066,6 +1075,14 @@ class EchoForCausalLM(EchoPreTrainedModel, GenerationMixin):
         return reordered_past
 
 
+class EchoClassifier(nn.Linear):
+    def forward(self, input: torch.Tensor) -> torch.Tensor:
+        res = super().forward(input)
+        if res.ndim == 3 and res.size(1) == 1:
+            res = res.squeeze(1)
+        return res
+
+
 class EchoForSequenceClassification(EchoPreTrainedModel):
     """
     Echo-DSRN with a sequence-level classification head.
@@ -1100,9 +1117,17 @@ class EchoForSequenceClassification(EchoPreTrainedModel):
 
         classifier_dropout = getattr(config, "classifier_dropout", 0.0)
         self.dropout = nn.Dropout(classifier_dropout) if classifier_dropout > 0.0 else nn.Identity()
-        self.classifier = nn.Linear(config.embed_dim, self.num_labels, bias=True)
+        self.classifier = EchoClassifier(config.embed_dim, self.num_labels, bias=True)
 
         self.post_init()
+
+    @property
+    def score(self) -> EchoClassifier:
+        return self.classifier
+
+    @score.setter
+    def score(self, value: EchoClassifier):
+        self.classifier = value
 
     # ------------------------------------------------------------------
     # HF embedding hooks (required by PreTrainedModel)

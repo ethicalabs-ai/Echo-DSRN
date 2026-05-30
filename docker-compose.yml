@@ -1,7 +1,7 @@
 # ─────────────────────────────────────────────────────────────────────────────
 # docker-compose.yml
-# Serve Echo-DSRN 114M and Echo-Hybrid 0.5B simultaneously via vLLM
-# (ROCm / AMD GPU)
+# Serve Echo-DSRN and Echo-Hybrid simultaneously via vLLM (ROCm / AMD GPU)
+# Base image: vllm/vllm-openai-rocm:latest  (formerly rocm/vllm-openai)
 #
 # Prerequisites
 # ─────────────
@@ -14,15 +14,16 @@
 #   docker compose build
 #   docker compose up
 #
-#   # Echo-DSRN OpenAI-compatible API:
-#   curl http://localhost:8000/v1/completions \
-#     -H "Content-Type: application/json" \
-#     -d '{"model":"echo-dsrn","prompt":"Hello, world","max_tokens":32}'
 #
 #   # Echo-Hybrid OpenAI-compatible API:
 #   curl http://localhost:8001/v1/completions \
 #     -H "Content-Type: application/json" \
 #     -d '{"model":"echo-hybrid","prompt":"Hello, world","max_tokens":32}'
+#
+#   # Echo-Intent classification API:
+#   curl http://localhost:8002/classify \
+#     -H "Content-Type: application/json" \
+#     -d '{"model":"echo-intent","input":["Is it going to rain today?"]}'
 #
 # Serving local checkpoints
 # ─────────────────────────
@@ -33,19 +34,21 @@
 # ────────────────────────────────────────────────────
 #   HF_TOKEN              HuggingFace token (needed for private/gated models)
 #   ROCR_VISIBLE_DEVICES  Comma-separated GPU indices (default: all)
-#   DSRN_GPU              GPU index for Echo-DSRN  (default: 0)
 #   HYBRID_GPU            GPU index for Echo-Hybrid (default: 0; set to 1 for
 #                         multi-GPU setups)
-#   DSRN_DTYPE            bfloat16 | float16 | auto   (default: bfloat16)
+#   INTENT_GPU            GPU index for Echo-Intent (default: 0)
 #   HYBRID_DTYPE          bfloat16 | float16 | auto   (default: bfloat16)
-#   DSRN_GPU_MEM          Fraction of GPU memory vLLM may use (default: 0.45)
-#   HYBRID_GPU_MEM        Same for Hybrid service              (default: 0.45)
+#   INTENT_DTYPE          bfloat16 | float16 | auto   (default: bfloat16)
+#   HYBRID_GPU_MEM        Same for Hybrid service              (default: 0.25)
+#   INTENT_GPU_MEM        Fraction of GPU memory vLLM may use (default: 0.15)
+#   HYBRID_MAX_LEN        Max context length for Echo-Hybrid  (default: 8192, Qwen2.5 backbone supports 32k)
+#   INTENT_MAX_LEN        Max context length for Echo-Intent  (default: 2048)
 # ─────────────────────────────────────────────────────────────────────────────
 
 x-rocm-common: &rocm-common
   build:
     context: .
-    dockerfile: Dockerfile.rocm
+    dockerfile: Dockerfile
   # ROCm device access — exposes all GPUs; restrict via ROCR_VISIBLE_DEVICES
   devices:
     - /dev/kfd
@@ -69,41 +72,7 @@ x-rocm-common: &rocm-common
   restart: unless-stopped
 
 services:
-
-  # ── Echo-DSRN 114M v0.1.2 ─────────────────────────────────────────────────
-  echo-dsrn:
-    <<: *rocm-common
-    container_name: echo-dsrn
-    ports:
-      - "8000:8000"
-    environment:
-      - HUGGING_FACE_HUB_TOKEN=${HF_TOKEN:-}
-      - HF_HUB_ENABLE_HF_TRANSFER=1
-      - ROCR_VISIBLE_DEVICES=${DSRN_GPU:-0}
-    command:
-      - --model
-      - ${DSRN_MODEL:-ethicalabs/Echo-DSRN-114M-v0.1.2}
-      - --served-model-name
-      - echo-dsrn
-      - --trust-remote-code
-      - --host
-      - "0.0.0.0"
-      - --port
-      - "8000"
-      - --dtype
-      - ${DSRN_DTYPE:-bfloat16}
-      - --gpu-memory-utilization
-      - ${DSRN_GPU_MEM:-0.45}
-      - --max-model-len
-      - "4096"
-    healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
-      interval: 30s
-      timeout: 10s
-      retries: 5
-      start_period: 60s
-
-  # ── Echo-Hybrid 0.5B ───────────────────────────────────────────────────────
+  # ── Echo-Hybrid 0.7B ───────────────────────────────────────────────────────
   echo-hybrid:
     <<: *rocm-common
     container_name: echo-hybrid
@@ -115,7 +84,7 @@ services:
       - ROCR_VISIBLE_DEVICES=${HYBRID_GPU:-0}
     command:
       - --model
-      - ${HYBRID_MODEL:-ethicalabs/Echo-Hybrid-0.5B}
+      - ${HYBRID_MODEL:-mrs83/Kurtis-EON1-Hybrid-0.7B-v0.1.1}
       - --served-model-name
       - echo-hybrid
       - --trust-remote-code
@@ -126,16 +95,64 @@ services:
       - --dtype
       - ${HYBRID_DTYPE:-bfloat16}
       - --gpu-memory-utilization
-      - ${HYBRID_GPU_MEM:-0.45}
+      - ${HYBRID_GPU_MEM:-0.25}
       - --max-model-len
-      - "4096"
+      - "${HYBRID_MAX_LEN:-8192}"
       - --enable-auto-tool-choice
       - --tool-call-parser
       - hermes
-      - --chat-template
-      - /app/echo_dsrn/tool_chat_template.jinja
+      # Required for recurrent DSRN state: CUDA graph capture freezes
+      # HybridEchoCache.dsrn_states as a constant, wiping recurrent state
+      # each decode step and causing hallucinations (same fix as Jamba/Mamba).
+      - --enforce-eager
     healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:8001/health"]
+      test: [ "CMD", "curl", "-f", "http://localhost:8001/health" ]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 60s
+
+  # ── Echo-Intent (Intent Classifier) ──────────────────────────────
+  echo-intent:
+    <<: *rocm-common
+    container_name: echo-intent
+    ports:
+      - "8002:8002"
+    volumes:
+      - hf-cache:/root/.cache/huggingface
+      - .:/workspace
+    environment:
+      - HUGGING_FACE_HUB_TOKEN=${HF_TOKEN:-}
+      - HF_HUB_ENABLE_HF_TRANSFER=1
+      - ROCR_VISIBLE_DEVICES=${INTENT_GPU:-0}
+    command:
+      - --model
+      - ${INTENT_MODEL:-ethicalabs/Echo-DSRN-v0.1.3-Intent-CLF}
+      - --served-model-name
+      - echo-intent
+      - --runner
+      - pooling
+      - --convert
+      - classify
+      - --trust-remote-code
+      - --host
+      - "0.0.0.0"
+      - --port
+      - "8002"
+      - --dtype
+      - ${INTENT_DTYPE:-bfloat16}
+      - --pooler-config
+      - '{"pooling_type": "LAST"}'
+      - --gpu-memory-utilization
+      - ${INTENT_GPU_MEM:-0.15}
+      - --max-model-len
+      - "${INTENT_MAX_LEN:-2048}"
+      # Required for recurrent DSRN state: CUDA graph capture freezes
+      # HybridEchoCache.dsrn_states as a constant, wiping recurrent state
+      # each decode step and causing hallucinations.
+      - --enforce-eager
+    healthcheck:
+      test: [ "CMD", "curl", "-f", "http://localhost:8002/health" ]
       interval: 30s
       timeout: 10s
       retries: 5
