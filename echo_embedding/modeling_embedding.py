@@ -5,7 +5,10 @@ import torch.nn as nn
 from transformers.modeling_outputs import BaseModelOutputWithPast
 
 try:
+    # pyrefly: ignore [missing-import]
     from .configuration_echo import EchoConfig
+
+    # pyrefly: ignore [missing-import]
     from .modeling_echo import EchoModel, EchoPreTrainedModel
 except ImportError:
     from echo_dsrn.configuration_echo import EchoConfig
