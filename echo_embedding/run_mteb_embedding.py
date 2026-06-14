@@ -63,8 +63,24 @@ def main():
 
     os.makedirs(args.output_dir, exist_ok=True)
 
-    # Run evaluation
-    results = mteb.evaluate(model=model, tasks=tasks)
+    from mteb.models.sentence_transformer_wrapper import (
+        SentenceTransformerEncoderWrapper,
+    )
+
+    # Wrap model and set unique name based on the path
+    wrapped_model = SentenceTransformerEncoderWrapper(model)
+    model_name = os.path.basename(os.path.normpath(args.model_path))
+    full_name = f"ethicalabs/{model_name}"
+
+    # Update metadata to ensure unique cache keys and result filenames
+    wrapped_model.mteb_model_meta = wrapped_model.mteb_model_meta.model_copy(
+        update={"name": full_name}
+    )
+
+    print(f"🏷️ Assigned unique MTEB model name: {full_name}")
+
+    # Run evaluation forcing a live run (overwrite_strategy="always")
+    results = mteb.evaluate(model=wrapped_model, tasks=tasks, overwrite_strategy="always")
 
     # Save results dictionary to output directory
     output_file = os.path.join(args.output_dir, "mteb_evaluation_results.json")

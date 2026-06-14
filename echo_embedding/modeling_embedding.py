@@ -29,7 +29,16 @@ class EchoModelForSentenceEmbedding(EchoPreTrainedModel):
         # Optional projection layer to map state_dim (hidden_size * num_heads)
         # back to a specific target embedding dimension.
         self.project_embeddings = getattr(config, "project_embeddings", False)
-        if self.project_embeddings:
+        self.projection_mlp = getattr(config, "projection_mlp", False)
+        if self.projection_mlp:
+            target_dim = getattr(config, "embedding_dim", config.hidden_size)
+            hidden_dim = getattr(config, "projection_hidden_dim", 1024)
+            self.projection = nn.Sequential(
+                nn.Linear(config.hidden_size * config.num_heads, hidden_dim),
+                nn.GELU(),
+                nn.Linear(hidden_dim, target_dim, bias=False),
+            )
+        elif self.project_embeddings:
             target_dim = getattr(config, "embedding_dim", config.hidden_size)
             self.projection = nn.Linear(
                 config.hidden_size * config.num_heads, target_dim, bias=False

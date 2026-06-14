@@ -137,3 +137,30 @@ def test_autoclass_registration_embedding(tiny_echo_embedding_config):
     # Resolve and instantiate from AutoModel
     model = AutoModel.from_config(config)
     assert isinstance(model, EchoModelForSentenceEmbedding)
+
+
+def test_embedding_projection_mlp(tiny_echo_embedding_config):
+    """Test embedding model with an active non-linear MLP projection layer."""
+    config = tiny_echo_embedding_config
+    config.projection_mlp = True
+    config.embedding_dim = 128
+    config.projection_hidden_dim = 96
+
+    model = EchoModelForSentenceEmbedding(config)
+    model.eval()
+
+    batch_size = 2
+    seq_len = 6
+    input_ids = torch.randint(0, 1000, (batch_size, seq_len))
+
+    with torch.no_grad():
+        outputs = model(input_ids=input_ids, return_dict=True)
+
+    assert outputs.last_hidden_state.shape == (batch_size, seq_len, 128)
+    assert model.projection is not None
+    assert isinstance(model.projection, torch.nn.Sequential)
+    # Check layers in projection Sequential
+    assert len(model.projection) == 3
+    assert isinstance(model.projection[0], torch.nn.Linear)
+    assert isinstance(model.projection[1], torch.nn.GELU)
+    assert isinstance(model.projection[2], torch.nn.Linear)
