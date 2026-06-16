@@ -189,7 +189,7 @@ def dsrn_parallel_kernel_legacy(
     h_prev: torch.Tensor,
     c_prev: torch.Tensor,
     eos_mask: Optional[torch.Tensor] = None,
-) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
     """
     Legacy DSRN kernel (Fixed LayerNorm, No Surprise Read).
     Identical to the version that passed verification.
@@ -276,7 +276,7 @@ def dsrn_parallel_kernel_legacy(
     # Enabled on Legacy to fix Disconnected Slow State bug while keeping LayerNorm
     x_out = x_out + model_block.linear_read(c_all)
 
-    return x_out, h_new, c_new, gate_stats
+    return x_out, h_new, c_new, gate_stats, h_all, c_all
 
 
 def dsrn_parallel_kernel_hybrid(
@@ -285,7 +285,7 @@ def dsrn_parallel_kernel_hybrid(
     h_prev: torch.Tensor,
     c_prev: torch.Tensor,
     eos_mask: Optional[torch.Tensor] = None,
-) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
     """
     Hybrid DSRN kernel (RMSNorm + Surprise Read).
     """
@@ -352,7 +352,7 @@ def dsrn_parallel_kernel_hybrid(
     if model_block.use_hybrid_attention:
         x_out = x_out + model_block.linear_read(c_all)
 
-    return x_out, h_new, c_new, gate_stats
+    return x_out, h_new, c_new, gate_stats, h_all, c_all
 
 
 def dsrn_parallel_kernel(
@@ -361,7 +361,7 @@ def dsrn_parallel_kernel(
     h_prev: torch.Tensor,
     c_prev: torch.Tensor,
     eos_mask: Optional[torch.Tensor] = None,
-) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
     """
     Wrapper for backward compatibility. Dispatches based on config.
     """
@@ -453,6 +453,7 @@ class SlidingWindowAttention(nn.Module):
         self.num_heads = config.num_heads
         self.head_dim = self.hidden_size // self.num_heads
         self.window_size = getattr(config, "window_size", 128)
+        self.attention_masking = getattr(config, "attention_masking", "causal")
 
         self.qkv_proj = nn.Linear(self.hidden_size, 3 * self.hidden_size, bias=False)
         self.out_proj = nn.Linear(self.hidden_size, self.hidden_size, bias=False)
@@ -539,12 +540,18 @@ class SlidingWindowAttention(nn.Module):
             col_idx = torch.arange(kv_all_seq_len, device=x.device).view(1, -1)
             abs_pos = row_idx + past_seq_len
 
-            # Causal upper triangle = -inf
-            mask = torch.where(col_idx > abs_pos, float("-inf"), mask)
+            if self.attention_masking == "non_causal_window":
+                w_half = self.window_size // 2 if self.window_size is not None else None
+                if w_half is not None:
+                    # Keep tokens in range [abs_pos - w_half, abs_pos + w_half]
+                    mask = torch.where(torch.abs(abs_pos - col_idx) > w_half, float("-inf"), mask)
+            else:
+                # Causal upper triangle = -inf
+                mask = torch.where(col_idx > abs_pos, float("-inf"), mask)
 
-            # Keep tokens in range [abs_pos - self.window_size, abs_pos]
-            if self.window_size is not None:
-                mask = torch.where((abs_pos - col_idx) >= self.window_size, float("-inf"), mask)
+                # Keep tokens in range [abs_pos - self.window_size, abs_pos]
+                if self.window_size is not None:
+                    mask = torch.where((abs_pos - col_idx) >= self.window_size, float("-inf"), mask)
 
             # Replace -inf with 0 for the permitted window (float mask expected by sdpa)
             mask = torch.where(mask == float("-inf"), mask, torch.zeros_like(mask))
@@ -609,7 +616,7 @@ class DSRNBlock(nn.Module):
 
     def forward(
         self, x: torch.Tensor, state_prev: Tuple[torch.Tensor, ...], **kwargs
-    ) -> Tuple[torch.Tensor, Tuple[torch.Tensor, ...]]:
+    ) -> Tuple[torch.Tensor, Tuple[torch.Tensor, ...], ...]:
 
         # Unpack state
         # Supports (h, c) or (h, c, k_attn, v_attn)
@@ -621,7 +628,9 @@ class DSRNBlock(nn.Module):
             pass
 
         # Use Parallel Kernel
-        x_out, h_new, c_new, gate_stats = dsrn_parallel_kernel(self, x, h_prev, c_prev)
+        x_out, h_new, c_new, gate_stats, h_all, c_all = dsrn_parallel_kernel(
+            self, x, h_prev, c_prev
+        )
 
         if self.use_hybrid_attention:
             # Re-apply norm for attention branch (cleanest for surgical transplant)
@@ -647,6 +656,8 @@ class DSRNBlock(nn.Module):
         else:
             h_new_full = (h_new, c_new)
 
+        if kwargs.get("output_all_states", False):
+            return x_out, h_new_full, gate_stats, h_all, c_all
         return x_out, h_new_full, gate_stats
 
 
@@ -746,6 +757,7 @@ class EchoModel(EchoPreTrainedModel):
         output_attentions: Optional[bool] = None,
         output_hidden_states: Optional[bool] = None,
         return_dict: Optional[bool] = None,
+        output_all_states: Optional[bool] = False,
         **kwargs,
     ) -> Union[Tuple, BaseModelOutputWithPast]:
 
@@ -784,6 +796,8 @@ class EchoModel(EchoPreTrainedModel):
 
         all_gate_stats = [] if output_dsrn_telemetry else None
         all_c_states = [] if output_dsrn_telemetry else None
+        all_h_all = [] if output_all_states else None
+        all_c_all = [] if output_all_states else None
 
         # Layer-Major Execution
         for i, block in enumerate(self.blocks):
@@ -809,9 +823,16 @@ class EchoModel(EchoPreTrainedModel):
             # Use gradient checkpointing if enabled
             if self.gradient_checkpointing and self.training:
                 # Checkpointing complex states is tricky, usually just pass h/c
-                out = torch.utils.checkpoint.checkpoint(block, x, state_i, use_reentrant=False)
+                out = torch.utils.checkpoint.checkpoint(
+                    block,
+                    x,
+                    state_i,
+                    use_reentrant=False,
+                    output_all_states=output_all_states,
+                    **kwargs,
+                )
             else:
-                out = block(x, state_i, **kwargs)
+                out = block(x, state_i, output_all_states=output_all_states, **kwargs)
 
             x = out[0]
             next_states.append(out[1])
@@ -819,6 +840,10 @@ class EchoModel(EchoPreTrainedModel):
             if output_dsrn_telemetry:
                 all_gate_stats.append(out[2])
                 all_c_states.append(out[1][1])
+
+            if output_all_states:
+                all_h_all.append(out[3])
+                all_c_all.append(out[4])
 
         x = self.final_norm(x)
 
@@ -831,7 +856,11 @@ class EchoModel(EchoPreTrainedModel):
         # Revert to raw tuple outputs if return_dict=False is requested
         if not return_dict:
             if output_dsrn_telemetry:
+                if output_all_states:
+                    return x, next_states, all_c_states, all_gate_stats, all_h_all, all_c_all
                 return x, next_states, all_c_states, all_gate_stats
+            if output_all_states:
+                return x, next_states, all_h_all, all_c_all
             return x, next_states
 
         # Standard HF Object wrapper containing last_hidden_state
@@ -844,6 +873,9 @@ class EchoModel(EchoPreTrainedModel):
         if output_dsrn_telemetry:
             output_obj.all_c_states = all_c_states
             output_obj.all_gate_stats = all_gate_stats
+        if output_all_states:
+            output_obj.all_h_all = all_h_all
+            output_obj.all_c_all = all_c_all
         return output_obj
 
 

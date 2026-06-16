@@ -30,8 +30,8 @@ def main():
     parser.add_argument(
         "--tasks",
         type=str,
-        default="STS12",
-        help="Comma-separated list of MTEB task names to evaluate on (default: 'STS12').",
+        default="STS12,STS13,STS14,STS15,STS16,STSBenchmark,SICK-R,STS17,STS22",
+        help="Comma-separated list of MTEB task names to evaluate on.",
     )
     parser.add_argument(
         "--output_dir",

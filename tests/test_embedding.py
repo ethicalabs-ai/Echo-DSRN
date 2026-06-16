@@ -164,3 +164,42 @@ def test_embedding_projection_mlp(tiny_echo_embedding_config):
     assert isinstance(model.projection[0], torch.nn.Linear)
     assert isinstance(model.projection[1], torch.nn.GELU)
     assert isinstance(model.projection[2], torch.nn.Linear)
+
+
+def test_new_pooling_and_masking_modes(tiny_echo_embedding_config):
+    """Test the newly added pooling and attention masking modes."""
+    # Test mean_c_all
+    config = tiny_echo_embedding_config
+    config.pooling_mode = "mean_c_all"
+    config.attention_masking = "non_causal_window"
+
+    model = EchoModelForSentenceEmbedding(config)
+    model.eval()
+
+    batch_size = 2
+    seq_len = 8
+    input_ids = torch.randint(0, 1000, (batch_size, seq_len))
+    attention_mask = torch.ones((batch_size, seq_len), dtype=torch.long)
+
+    with torch.no_grad():
+        outputs = model(input_ids=input_ids, attention_mask=attention_mask, return_dict=True)
+
+    expected_dim = model.config.hidden_size * model.config.num_heads
+    assert outputs.last_hidden_state.shape == (batch_size, seq_len, expected_dim)
+
+    # Test mean_x_out
+    config.pooling_mode = "mean_x_out"
+    model = EchoModelForSentenceEmbedding(config)
+    model.eval()
+    with torch.no_grad():
+        outputs = model(input_ids=input_ids, attention_mask=attention_mask, return_dict=True)
+    assert outputs.last_hidden_state.shape == (batch_size, seq_len, model.config.hidden_size)
+
+    # Test hybrid
+    config.pooling_mode = "hybrid"
+    model = EchoModelForSentenceEmbedding(config)
+    model.eval()
+    with torch.no_grad():
+        outputs = model(input_ids=input_ids, attention_mask=attention_mask, return_dict=True)
+    expected_hybrid_dim = model.config.hidden_size * (model.config.num_heads + 1)
+    assert outputs.last_hidden_state.shape == (batch_size, seq_len, expected_hybrid_dim)

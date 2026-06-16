@@ -17,6 +17,8 @@ class EchoConfig(PretrainedConfig):
         use_hybrid_attention=True,
         use_rmsnorm=True,
         mlp_bias: bool = False,
+        pooling_mode: str = "c_T",
+        attention_masking: str = "causal",
         # --- Classification fields (optional, ignored by CausalLM) ---
         num_labels: int = 2,
         id2label: Optional[dict] = None,
@@ -52,6 +54,8 @@ class EchoConfig(PretrainedConfig):
         self.use_hybrid_attention = use_hybrid_attention
         self.use_rmsnorm = use_rmsnorm
         self.mlp_bias = mlp_bias
+        self.pooling_mode = pooling_mode
+        self.attention_masking = attention_masking
         self.classifier_dropout = classifier_dropout
 
         # Standard HF aliases

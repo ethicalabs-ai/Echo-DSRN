@@ -9,7 +9,13 @@ from echo_dsrn import EchoConfig, EchoForCausalLM
 from echo_embedding.modeling_embedding import EchoModelForSentenceEmbedding
 
 
-def convert_model(base_model_path: str, output_dir: str, peft_model_path: str = None):
+def convert_model(
+    base_model_path: str,
+    output_dir: str,
+    peft_model_path: str = None,
+    pooling_mode: str = "c_T",
+    attention_masking: str = "causal",
+):
     print(f"🔄 Starting conversion of {base_model_path} to embedding model...")
     if os.path.exists(output_dir):
         print(f"🧹 Cleaning existing target directory: {output_dir}")
@@ -28,6 +34,8 @@ def convert_model(base_model_path: str, output_dir: str, peft_model_path: str = 
     # 2. Load model config and modify auto_map
     print("⏳ Modifying and saving config...")
     config = EchoConfig.from_pretrained(base_model_path)
+    config.pooling_mode = pooling_mode
+    config.attention_masking = attention_masking
 
     # Configure auto_map so that AutoModel resolves to modeling_embedding.EchoModelForSentenceEmbedding
     config.auto_map = {
@@ -47,6 +55,8 @@ def convert_model(base_model_path: str, output_dir: str, peft_model_path: str = 
     print("⏳ Loading weights and saving model...")
     # Temporarily clear auto_map for local instantiation to prevent HF recursion
     temp_config = EchoConfig.from_pretrained(base_model_path)
+    temp_config.pooling_mode = pooling_mode
+    temp_config.attention_masking = attention_masking
     temp_config.auto_map = {}
 
     if peft_model_path:
@@ -72,7 +82,11 @@ def convert_model(base_model_path: str, output_dir: str, peft_model_path: str = 
 
     # 4. Copy modeling code to both root and transformer directories
     print("⏳ Copying modeling code...")
-    local_modeling_path = os.path.join(os.path.dirname(__file__), "modeling_embedding.py")
+    local_modeling_path = os.path.join(
+        os.path.dirname(os.path.dirname(__file__)),
+        "echo_embedding",
+        "modeling_embedding.py",
+    )
     # Copy modeling_embedding.py
     shutil.copy(local_modeling_path, os.path.join(output_dir, "modeling_embedding.py"))
     shutil.copy(local_modeling_path, os.path.join(transformer_dir, "modeling_embedding.py"))
@@ -96,7 +110,8 @@ def convert_model(base_model_path: str, output_dir: str, peft_model_path: str = 
                     "                    from echo_dsrn.triton_scan import triton_dsrn_parallel_scan"
                 )
                 content = content.replace(
-                    "            from .triton_scan import triton_dsrn_parallel_scan", target_import
+                    "            from .triton_scan import triton_dsrn_parallel_scan",
+                    target_import,
                 )
                 for dest_dir in [output_dir, transformer_dir]:
                     with open(os.path.join(dest_dir, filename), "w", encoding="utf-8") as f:
@@ -108,8 +123,16 @@ def convert_model(base_model_path: str, output_dir: str, peft_model_path: str = 
     # 5. Write modules.json for SentenceTransformers
     print("⏳ Writing SentenceTransformers modules.json...")
     modules = [
-        {"name": "0", "type": "sentence_transformers.models.Transformer", "path": "0_Transformer"},
-        {"name": "1", "type": "sentence_transformers.models.Pooling", "path": "1_Pooling"},
+        {
+            "name": "0",
+            "type": "sentence_transformers.models.Transformer",
+            "path": "0_Transformer",
+        },
+        {
+            "name": "1",
+            "type": "sentence_transformers.models.Pooling",
+            "path": "1_Pooling",
+        },
     ]
     with open(os.path.join(output_dir, "modules.json"), "w", encoding="utf-8") as f:
         json.dump(modules, f, indent=2)
@@ -119,8 +142,19 @@ def convert_model(base_model_path: str, output_dir: str, peft_model_path: str = 
     pooling_dir = os.path.join(output_dir, "1_Pooling")
     os.makedirs(pooling_dir, exist_ok=True)
 
+    if getattr(config, "project_embeddings", False) or getattr(config, "projection_mlp", False):
+        word_emb_dim = getattr(config, "embedding_dim", config.hidden_size)
+    else:
+        pooling_mode = getattr(config, "pooling_mode", "c_T")
+        if pooling_mode == "hybrid":
+            word_emb_dim = config.hidden_size * (config.num_heads + 1)
+        elif pooling_mode == "mean_x_out":
+            word_emb_dim = config.hidden_size
+        else:
+            word_emb_dim = config.hidden_size * config.num_heads
+
     pooling_config = {
-        "word_embedding_dimension": config.hidden_size * config.num_heads,
+        "word_embedding_dimension": word_emb_dim,
         "pooling_mode_cls_token": False,
         "pooling_mode_mean_tokens": True,
         "pooling_mode_max_tokens": False,
@@ -151,9 +185,27 @@ def main():
         default=None,
         help="PEFT adapter name or path to load and merge (optional)",
     )
+    parser.add_argument(
+        "--pooling_mode",
+        type=str,
+        default="c_T",
+        help="Pooling mode ('c_T', 'mean_c_all', 'mean_x_out', 'hybrid')",
+    )
+    parser.add_argument(
+        "--attention_masking",
+        type=str,
+        default="causal",
+        help="Attention masking strategy ('causal', 'non_causal_window')",
+    )
     args = parser.parse_args()
 
-    convert_model(args.base_model, args.output_dir, args.peft_model)
+    convert_model(
+        args.base_model,
+        args.output_dir,
+        args.peft_model,
+        pooling_mode=args.pooling_mode,
+        attention_masking=args.attention_masking,
+    )
 
 
 if __name__ == "__main__":

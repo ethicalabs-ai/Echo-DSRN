@@ -18,31 +18,37 @@ except ImportError:
 class EchoModelForSentenceEmbedding(EchoPreTrainedModel):
     """
     Sentence embedding adapter for Echo-DSRN.
-    Extracts the recurrent state 'c' from the final layer and shapes it
+    Extracts the recurrent state 'c' or sequences from layers and shapes them
     for sentence-transformers compatibility.
     """
 
     def __init__(self, config: EchoConfig):
         super().__init__(config)
         self.model = EchoModel(config)
+        self.pooling_mode = getattr(config, "pooling_mode", "c_T")
 
-        # Optional projection layer to map state_dim (hidden_size * num_heads)
-        # back to a specific target embedding dimension.
+        # Determine target dimension for the projection input
+        if self.pooling_mode == "hybrid":
+            proj_in_dim = config.hidden_size * (config.num_heads + 1)
+        elif self.pooling_mode == "mean_x_out":
+            proj_in_dim = config.hidden_size
+        else:  # "c_T" or "mean_c_all"
+            proj_in_dim = config.hidden_size * config.num_heads
+
+        # Optional projection layer to map back to a specific target embedding dimension.
         self.project_embeddings = getattr(config, "project_embeddings", False)
         self.projection_mlp = getattr(config, "projection_mlp", False)
         if self.projection_mlp:
             target_dim = getattr(config, "embedding_dim", config.hidden_size)
             hidden_dim = getattr(config, "projection_hidden_dim", 1024)
             self.projection = nn.Sequential(
-                nn.Linear(config.hidden_size * config.num_heads, hidden_dim),
+                nn.Linear(proj_in_dim, hidden_dim),
                 nn.GELU(),
                 nn.Linear(hidden_dim, target_dim, bias=False),
             )
         elif self.project_embeddings:
             target_dim = getattr(config, "embedding_dim", config.hidden_size)
-            self.projection = nn.Linear(
-                config.hidden_size * config.num_heads, target_dim, bias=False
-            )
+            self.projection = nn.Linear(proj_in_dim, target_dim, bias=False)
         else:
             self.projection = None
 
@@ -69,6 +75,9 @@ class EchoModelForSentenceEmbedding(EchoPreTrainedModel):
 
         return_dict = return_dict if return_dict is not None else self.config.use_return_dict
 
+        pooling_mode = getattr(self.config, "pooling_mode", "c_T")
+        output_all_states = pooling_mode in ["mean_c_all", "hybrid"]
+
         # 1. Base model forward pass
         outputs = self.model(
             input_ids=input_ids,
@@ -78,6 +87,7 @@ class EchoModelForSentenceEmbedding(EchoPreTrainedModel):
             output_attentions=output_attentions,
             output_hidden_states=output_hidden_states,
             return_dict=True,
+            output_all_states=output_all_states,
             **kwargs,
         )
 
@@ -89,26 +99,58 @@ class EchoModelForSentenceEmbedding(EchoPreTrainedModel):
         else:
             seq_len = 1
 
-        # 2. Extract final recurrent state 'c' from the last layer
-        past = outputs.past_key_values
-        if hasattr(past, "__getitem__"):
-            last_layer_state = past[-1]
-        elif hasattr(past, "states"):  # EchoCache support
-            last_layer_state = past.states[-1]
-        else:
-            raise ValueError("Could not extract recurrent state from model cache.")
+        def mean_pooling(token_embeddings, mask):
+            input_mask_expanded = mask.unsqueeze(-1).expand(token_embeddings.size()).float()
+            sum_embeddings = torch.sum(token_embeddings * input_mask_expanded, 1)
+            sum_mask = input_mask_expanded.sum(1)
+            sum_mask = torch.clamp(sum_mask, min=1e-9)
+            return sum_embeddings / sum_mask
 
-        # index 1 is c (the recurrent slow state)
-        c_state = last_layer_state[1]  # shape: (Batch, State_Dim)
+        # 2. Extract and pool representations according to pooling_mode
+        if pooling_mode == "mean_c_all":
+            # Extract full sequence of recurrent slow states c_all from last layer
+            c_all = outputs.all_c_all[-1]  # shape: (Batch, Seq_Len, State_Dim)
+            if attention_mask is not None:
+                pooled = mean_pooling(c_all, attention_mask)
+            else:
+                pooled = c_all.mean(dim=1)
+        elif pooling_mode == "mean_x_out":
+            # Mean pool the final hidden state
+            last_hidden_state = outputs.last_hidden_state  # shape: (Batch, Seq_Len, hidden_size)
+            if attention_mask is not None:
+                pooled = mean_pooling(last_hidden_state, attention_mask)
+            else:
+                pooled = last_hidden_state.mean(dim=1)
+        elif pooling_mode == "hybrid":
+            # Concatenate pooled fast states (h_all) and slow states (c_all) from last layer
+            h_all = outputs.all_h_all[-1]  # shape: (Batch, Seq_Len, hidden_size)
+            c_all = outputs.all_c_all[-1]  # shape: (Batch, Seq_Len, State_Dim)
+            if attention_mask is not None:
+                pooled_h = mean_pooling(h_all, attention_mask)
+                pooled_c = mean_pooling(c_all, attention_mask)
+            else:
+                pooled_h = h_all.mean(dim=1)
+                pooled_c = c_all.mean(dim=1)
+            pooled = torch.cat(
+                [pooled_h, pooled_c], dim=-1
+            )  # shape: (Batch, hidden_size + State_Dim)
+        else:  # "c_T" (default baseline behavior)
+            past = outputs.past_key_values
+            if hasattr(past, "__getitem__"):
+                last_layer_state = past[-1]
+            elif hasattr(past, "states"):  # EchoCache support
+                last_layer_state = past.states[-1]
+            else:
+                raise ValueError("Could not extract recurrent state from model cache.")
+            pooled = last_layer_state[1]  # shape: (Batch, State_Dim)
 
         # 3. Apply optional projection
         if self.projection is not None:
-            embeddings = self.projection(c_state)
+            embeddings = self.projection(pooled)
         else:
-            embeddings = c_state
+            embeddings = pooled
 
         # 4. Broadcast to shape (Batch, Seq_Len, Dim) for pooling safety
-        # Replicates c_T across all tokens; averages/CLS collapse back to c_T.
         embeddings_3d = embeddings.unsqueeze(1).expand(-1, seq_len, -1)
 
         if not return_dict:
