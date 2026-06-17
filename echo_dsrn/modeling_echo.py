@@ -235,9 +235,11 @@ def dsrn_parallel_kernel_legacy(
 
     x_pred = model_block.linear_pred(h_shifted)
     diff = x - x_pred
-    error = torch.clamp(diff * diff, max=10.0).mean(dim=-1, keepdim=True)
+    error = torch.clamp((diff * diff).float(), max=10.0).to(x.dtype).mean(dim=-1, keepdim=True)
     # Constrain surprise_lambda strictly positive to guarantee error opens the memory gate
-    surprise_signal = error * torch.nn.functional.softplus(model_block.surprise_lambda)
+    surprise_signal = error * torch.nn.functional.softplus(model_block.surprise_lambda.float()).to(
+        x.dtype
+    )
 
     # Gates
     gate_logits = model_block.linear_gate(h_all) + surprise_signal
@@ -319,9 +321,11 @@ def dsrn_parallel_kernel_hybrid(
 
     x_pred = model_block.linear_pred(h_shifted)
     diff = x - x_pred
-    error = torch.clamp(diff * diff, max=10.0).mean(dim=-1, keepdim=True)
+    error = torch.clamp((diff * diff).float(), max=10.0).to(x.dtype).mean(dim=-1, keepdim=True)
     # Constrain surprise_lambda strictly positive to guarantee error opens the memory gate
-    surprise_signal = error * torch.nn.functional.softplus(model_block.surprise_lambda)
+    surprise_signal = error * torch.nn.functional.softplus(model_block.surprise_lambda.float()).to(
+        x.dtype
+    )
 
     gate_logits = model_block.linear_gate(h_all) + surprise_signal
     g_all = torch.sigmoid(gate_logits.float()).to(x.dtype)
