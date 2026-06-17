@@ -121,7 +121,7 @@ def dsrn_parallel_scan(g_t, m_t, c_0=None, chunk_size=32, use_triton=False):
     Uses a Hierarchical Chunked Scan for O(T/K + K) speed and stability,
     or a custom Triton kernel for dramatically reduced memory bandwidth.
     """
-    # Global Override: Disabling Triton scan while debugging LoRA NaN gradients
+    # Triton kernel for GPU-accelerated parallel scan.
     if use_triton and g_t.is_cuda:
         try:
             from .triton_scan import triton_dsrn_parallel_scan
@@ -204,10 +204,12 @@ def dsrn_parallel_kernel_legacy(
         bias=model_block.norm_fast.bias,
     )
 
-    # Fast State Path (Scan)
+    # Fast State — float32 sigmoid/tanh to avoid bf16 saturation NaN
     gru_proj = F.linear(x_norm, model_block.gru_cell.weight_ih, model_block.gru_cell.bias_ih)
-    z_all = torch.sigmoid(gru_proj[:, :, :D])
-    r_all = torch.tanh(gru_proj[:, :, 2 * D :])  # Optimization: slice instead of chunk
+    z_all = torch.sigmoid(gru_proj[:, :, :D].float()).to(x.dtype)
+    r_all = torch.tanh(gru_proj[:, :, 2 * D :].float()).to(
+        x.dtype
+    )  # Optimization: slice instead of chunk
 
     # --- EOS RESET LOGIC (Fast State) ---
     if eos_mask is not None:
@@ -239,8 +241,8 @@ def dsrn_parallel_kernel_legacy(
 
     # Gates
     gate_logits = model_block.linear_gate(h_all) + surprise_signal
-    g_all = torch.sigmoid(gate_logits)
-    m_all = torch.tanh(model_block.linear_memory(h_all))
+    g_all = torch.sigmoid(gate_logits.float()).to(x.dtype)
+    m_all = torch.tanh(model_block.linear_memory(h_all).float()).to(x.dtype)
 
     # --- EOS RESET LOGIC (Slow State) ---
     if eos_mask is not None:
@@ -294,10 +296,11 @@ def dsrn_parallel_kernel_hybrid(
     # 1. Norm (RMSNorm hardcoded for Hybrid path)
     x_norm = rms_norm_fn(x, model_block.norm_fast.weight)
 
-    # Fast State
+    # Fast State — compute sigmoid/tanh in float32 to avoid bf16 saturation
+    # producing 0 × inf = NaN in the backward pass.
     gru_proj = F.linear(x_norm, model_block.gru_cell.weight_ih, model_block.gru_cell.bias_ih)
-    z_all = torch.sigmoid(gru_proj[:, :, :D])
-    r_all = torch.tanh(gru_proj[:, :, 2 * D :])
+    z_all = torch.sigmoid(gru_proj[:, :, :D].float()).to(x.dtype)
+    r_all = torch.tanh(gru_proj[:, :, 2 * D :].float()).to(x.dtype)
 
     # --- EOS RESET LOGIC (Fast State) ---
     if eos_mask is not None:
@@ -321,8 +324,8 @@ def dsrn_parallel_kernel_hybrid(
     surprise_signal = error * torch.nn.functional.softplus(model_block.surprise_lambda)
 
     gate_logits = model_block.linear_gate(h_all) + surprise_signal
-    g_all = torch.sigmoid(gate_logits)
-    m_all = torch.tanh(model_block.linear_memory(h_all))
+    g_all = torch.sigmoid(gate_logits.float()).to(x.dtype)
+    m_all = torch.tanh(model_block.linear_memory(h_all).float()).to(x.dtype)
 
     # --- EOS RESET LOGIC (Slow State) ---
     if eos_mask is not None:

@@ -257,3 +257,51 @@ def test_trl_chunked_nll_compatibility(tiny_echo_dsrn):
     assert causal_outputs.hidden_states is not None
     assert len(causal_outputs.hidden_states) == 1
     assert causal_outputs.hidden_states[0].shape == base_outputs.last_hidden_state.shape
+
+
+def test_dsrn_gate_bf16_saturation_no_nan():
+    """Gate sigmoid/tanh must not produce NaN gradients under bf16 saturation.
+
+    When gate parameters drift to extreme values during training (common after
+    Stage 1 MNRL), sigmoid/tanh saturate to exact 0/1 in bf16.  The backward
+    must not produce 0 × inf = NaN.
+    """
+    if not torch.cuda.is_available():
+        pytest.skip("bf16 saturation test requires CUDA")
+
+    from echo_dsrn.modeling_echo import DSRNBlock
+
+    config = EchoConfig(
+        hidden_size=64,
+        num_attention_heads=2,
+        num_key_value_heads=2,
+        window_size=16,
+        use_hybrid_attention=True,
+    )
+    block = DSRNBlock(config).cuda().bfloat16().train()
+
+    # Push gate biases to saturation regime
+    with torch.no_grad():
+        block.linear_gate.bias.fill_(6.0)  # sigmoid(6) ≈ 0.998
+        block.gru_cell.bias_ih.fill_(6.0)  # sigmoid(6) ≈ 0.998
+
+    B, T, D = 2, 64, config.hidden_size
+    x = torch.randn(B, T, D, device="cuda", dtype=torch.bfloat16, requires_grad=True)
+    h_prev = torch.zeros(B, D, device="cuda", dtype=torch.bfloat16)
+    c_prev = torch.zeros(B, D * config.num_heads, device="cuda", dtype=torch.bfloat16)
+
+    state = (h_prev, c_prev)
+    out = block(x, state)
+    loss = out[0].sum()
+    loss.backward()
+
+    # Any NaN gradient in the block means the fix is broken
+    for name, p in block.named_parameters():
+        if p.grad is not None:
+            assert not p.grad.isnan().any(), f"NaN grad in {name}"
+
+    # Input gradient must also be clean
+    assert not x.grad.isnan().any(), "NaN in input gradient"
+
+    # Forward must be finite
+    assert not out[0].isnan().any(), "NaN in forward output"
