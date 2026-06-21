@@ -364,6 +364,18 @@ However, the zero-shot task metrics reveal a significant downstream benefit. Whi
 
 This confirms the architectural intent: while the gate consumes capacity that could be used for raw fluency (harming Wikitext), it acts as an effective semantic compressor, retaining critical long-horizon facts necessary for structured retrieval tasks like SciQ far better than standard gating or equivalent-scale transformers.
 
+### Downstream Evaluation: Semantic Textual Similarity & Dense Embeddings
+
+Evaluating the representation capability of the recurrent-hybrid architecture by converting Echo-DSRN-114M into a dense sentence embedding model is currently a **Work In Progress (WIP)**.
+
+To systematically evaluate how the surprise-gated slow memory state $c_t$ encodes and aligns high-dimensional semantic constructs without relying on global self-attention, we are setting up a multi-stage representation fine-tuning curriculum:
+
+1. **Contrastive Pre-training**: Aligning the dense representation space using natural language NLI datasets under a multiple-negatives contrastive objective.
+2. **Fine-grained Similarity Calibration**: Calibration on Semantic Textual Similarity benchmarks (such as STS Benchmark and SICK-R) using a Surprisal-Aware CoSENT loss.
+3. **Multi-Task Generalization & Matryoshka Representation Learning (MRL)**: Evaluating performance retention when slicing the 2048-dimensional recurrent states down to smaller dimensions (1024, 512, 256, 128) to assess semantic compression.
+
+Detailed empirical performance tables comparing our models against quadratic-complexity Transformer baselines across MTEB benchmarks will be added in a subsequent revision of this working paper once the training run completes.
+
 ---
 
 ## Comparison to Related Work

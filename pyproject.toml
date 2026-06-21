@@ -9,6 +9,7 @@ dependencies = [
     "datasets>=2.14.0",
     "numpy>=1.21.0",
     "peft>=0.18.0",
+    "sentence-transformers>=5.5.1",
     "tqdm>=4.60.0",
     "transformers==5.2.0",
     "trl>=0.25.1",
@@ -32,12 +33,15 @@ rocm = [
     "triton-rocm",
 ]
 
+[project.scripts]
+echo-convert-embedding = "echo_embedding.convert_model:main"
+
 [build-system]
 requires = ["hatchling"]
 build-backend = "hatchling.build"
 
 [tool.hatch.build.targets.wheel]
-packages = ["echo_dsrn", "echo_hybrid"]
+packages = ["echo_dsrn", "echo_hybrid", "echo_embedding"]
 
 [dependency-groups]
 dev = [
