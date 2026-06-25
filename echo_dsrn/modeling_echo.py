@@ -621,9 +621,7 @@ class DSRNBlock(nn.Module):
         self.mlp_act = nn.GELU()
         self.mlp_down = nn.Linear(intermediate_size, config.hidden_size, bias=_mlp_bias)
 
-    def forward(
-        self, x: torch.Tensor, state_prev: Tuple[torch.Tensor, ...], **kwargs
-    ) -> Tuple[torch.Tensor, Tuple[torch.Tensor, ...], ...]:
+    def forward(self, x: torch.Tensor, state_prev: Tuple[torch.Tensor, ...], **kwargs) -> Tuple:
 
         # Unpack state
         # Supports (h, c) or (h, c, k_attn, v_attn)

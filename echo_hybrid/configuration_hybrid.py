@@ -17,7 +17,7 @@ CRITICAL NOTES (from AGENTS.md)
 • Do NOT use this config with EchoForCausalLM — that model expects EchoConfig.
 """
 
-from transformers import Qwen2Config
+from transformers import Qwen2Config, Qwen3Config
 
 
 class HybridEchoConfig(Qwen2Config):
@@ -81,4 +81,55 @@ class HybridEchoConfig(Qwen2Config):
             "AutoConfig": "configuration_hybrid.HybridEchoConfig",
             "AutoModel": "modeling_hybrid.HybridEchoModel",
             "AutoModelForCausalLM": "modeling_hybrid.HybridEchoForCausalLM",
+        }
+
+
+class Qwen3HybridEchoConfig(Qwen3Config):
+    """
+    Qwen3Config subclass that adds DSRN memory-injector fields.
+
+    Identical to HybridEchoConfig but inherits from Qwen3Config instead of
+    Qwen2Config, supporting the Qwen3 model family (e.g. Qwen/Qwen3-0.6B).
+
+    New fields
+    ----------
+    dsrn_state_dim : int
+        Dimension of the c_t slow-state vector maintained by each
+        DSRNMemoryInjector.  Defaults to 512.
+
+    dsrn_injection_stride : int
+        Insert one DSRNMemoryInjector after every N transformer layers.
+        For Qwen3-0.6B (28 layers) the default of 4 yields 7 injectors.
+
+    dsrn_use_triton : bool
+        Route the parallel scan to the custom Triton kernel.
+
+    gate_bias_init : float
+        Initial value of linear_gate.bias in every injector.
+
+    use_kv_cache : bool
+        Controls the backbone KV-cache.  Independent of use_cache (DSRN state return).
+    """
+
+    model_type = "qwen3_echo_hybrid"
+
+    def __init__(
+        self,
+        dsrn_state_dim: int = 512,
+        dsrn_injection_stride: int = 4,
+        dsrn_use_triton: bool = False,
+        gate_bias_init: float = 1.0,
+        use_kv_cache: bool = True,
+        **kwargs,
+    ):
+        super().__init__(**kwargs)
+        self.dsrn_state_dim = dsrn_state_dim
+        self.dsrn_injection_stride = dsrn_injection_stride
+        self.dsrn_use_triton = dsrn_use_triton
+        self.gate_bias_init = gate_bias_init
+        self.use_kv_cache = use_kv_cache
+        self.auto_map = {
+            "AutoConfig": "configuration_hybrid.Qwen3HybridEchoConfig",
+            "AutoModel": "modeling_hybrid.Qwen3HybridEchoModel",
+            "AutoModelForCausalLM": "modeling_hybrid.Qwen3HybridEchoForCausalLM",
         }
