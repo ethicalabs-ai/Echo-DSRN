@@ -156,11 +156,9 @@ def run_sweep(
         metrics: Dict[str, float] = {}
         task_results = result.get("results", {})
         for task_name, task_metrics in task_results.items():
-            # lm_eval keys are like "acc,none", "acc_norm,none" — take the first acc
             for key, value in task_metrics.items():
                 if "acc" in key.lower() and value is not None:
                     metrics[task_name] = value
-                    print(f"  {task_name}: {value:.4f}")
                     break  # take first accuracy metric
 
         all_results["results"][label] = metrics
@@ -169,6 +167,32 @@ def run_sweep(
         if torch.cuda.is_available():
             torch.cuda.empty_cache()
             torch.cuda.synchronize()
+
+    # ── Print summary table ─────────────────────────────────────────────
+    _tasks = all_results["tasks"]
+    _alphas = all_results["alphas"]
+    # Header
+    header = f"{'α':>6s}  " + "  ".join(f"{t:>12s}" for t in _tasks)
+    print(f"\n{header}")
+    print("-" * len(header))
+    for a in _alphas:
+        label = f"α={a}"
+        row = f"{a:6.1f}  "
+        if label in all_results["results"]:
+            for t in _tasks:
+                v = all_results["results"][label].get(t)
+                if isinstance(v, (int, float)):
+                    # Bold the best value per task
+                    best = max(
+                        (all_results["results"][f"α={oa}"].get(t, -1) for oa in _alphas),
+                        default=-1,
+                    )
+                    marker = " *" if v == best else "  "
+                    row += f"  {v:9.4f}{marker}"
+                else:
+                    row += f"  {'-':>11s}"
+        print(row)
+    print("  * = best α for that task")
 
     # Save results
     results_path = os.path.join(output_dir, "results_sweep.json")
