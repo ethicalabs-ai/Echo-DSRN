@@ -280,7 +280,7 @@ def dsrn_parallel_kernel_legacy(
     # Enabled on Legacy to fix Disconnected Slow State bug while keeping LayerNorm
     x_out = x_out + model_block.linear_read(c_all)
 
-    return x_out, h_new, c_new, gate_stats, h_all, c_all
+    return x_out, h_new, c_new, gate_stats, h_all, c_all, gate_logits
 
 
 def dsrn_parallel_kernel_hybrid(
@@ -359,7 +359,7 @@ def dsrn_parallel_kernel_hybrid(
     if model_block.use_hybrid_attention:
         x_out = x_out + model_block.linear_read(c_all)
 
-    return x_out, h_new, c_new, gate_stats, h_all, c_all
+    return x_out, h_new, c_new, gate_stats, h_all, c_all, gate_logits
 
 
 def dsrn_parallel_kernel(
@@ -632,8 +632,10 @@ class DSRNBlock(nn.Module):
             # Placeholder for Triton
             pass
 
+        output_gate_logits = kwargs.get("output_gate_logits", False)
+
         # Use Parallel Kernel
-        x_out, h_new, c_new, gate_stats, h_all, c_all = dsrn_parallel_kernel(
+        x_out, h_new, c_new, gate_stats, h_all, c_all, gate_logits = dsrn_parallel_kernel(
             self, x, h_prev, c_prev
         )
 
@@ -662,7 +664,11 @@ class DSRNBlock(nn.Module):
             h_new_full = (h_new, c_new)
 
         if kwargs.get("output_all_states", False):
+            if output_gate_logits:
+                return x_out, h_new_full, gate_stats, h_all, c_all, gate_logits
             return x_out, h_new_full, gate_stats, h_all, c_all
+        if output_gate_logits:
+            return x_out, h_new_full, gate_stats, gate_logits
         return x_out, h_new_full, gate_stats
 
 
@@ -804,6 +810,10 @@ class EchoModel(EchoPreTrainedModel):
         all_h_all = [] if output_all_states else None
         all_c_all = [] if output_all_states else None
 
+        # Gate logits for DSpark speculative decoding integration
+        _output_gl = getattr(self.config, "output_surprise_gate_logits", False)
+        all_gate_logits = [] if _output_gl else None
+
         # Layer-Major Execution
         for i, block in enumerate(self.blocks):
 
@@ -834,10 +844,17 @@ class EchoModel(EchoPreTrainedModel):
                     state_i,
                     use_reentrant=False,
                     output_all_states=output_all_states,
+                    output_gate_logits=_output_gl,
                     **kwargs,
                 )
             else:
-                out = block(x, state_i, output_all_states=output_all_states, **kwargs)
+                out = block(
+                    x,
+                    state_i,
+                    output_all_states=output_all_states,
+                    output_gate_logits=_output_gl,
+                    **kwargs,
+                )
 
             x = out[0]
             next_states.append(out[1])
@@ -845,6 +862,11 @@ class EchoModel(EchoPreTrainedModel):
             if output_dsrn_telemetry:
                 all_gate_stats.append(out[2])
                 all_c_states.append(out[1][1])
+
+            if _output_gl:
+                # gate_logits is at index 5 when output_all_states=False,
+                # and at index 5 when output_all_states=True (before h_all, c_all)
+                all_gate_logits.append(out[3] if not output_all_states else out[5])
 
             if output_all_states:
                 all_h_all.append(out[3])
@@ -864,6 +886,10 @@ class EchoModel(EchoPreTrainedModel):
                 if output_all_states:
                     return x, next_states, all_c_states, all_gate_stats, all_h_all, all_c_all
                 return x, next_states, all_c_states, all_gate_stats
+            if _output_gl:
+                if output_all_states:
+                    return x, next_states, all_gate_logits, all_h_all, all_c_all
+                return x, next_states, all_gate_logits
             if output_all_states:
                 return x, next_states, all_h_all, all_c_all
             return x, next_states
@@ -878,6 +904,8 @@ class EchoModel(EchoPreTrainedModel):
         if output_dsrn_telemetry:
             output_obj.all_c_states = all_c_states
             output_obj.all_gate_stats = all_gate_stats
+        if _output_gl:
+            output_obj.all_gate_logits = all_gate_logits
         if output_all_states:
             output_obj.all_h_all = all_h_all
             output_obj.all_c_all = all_c_all
@@ -990,6 +1018,12 @@ class EchoForCausalLM(EchoPreTrainedModel, GenerationMixin):
             else getattr(self.config, "use_return_dict", True)
         )
 
+        _output_gl = getattr(self.config, "output_surprise_gate_logits", False)
+        alpha = getattr(self.config, "surprise_temperature_alpha", 0.0)
+        # Force telemetry when alpha > 0 (needed for gate_stats)
+        if alpha > 0.0:
+            output_dsrn_telemetry = True
+
         '''
         If kwargs is getting overloaded with extra args HF generate passes,
         we safely extract kwargs here.
@@ -1013,9 +1047,12 @@ class EchoForCausalLM(EchoPreTrainedModel, GenerationMixin):
         if hasattr(model_out, "last_hidden_state"):
             hidden_states = model_out.last_hidden_state
             new_states = model_out.past_key_values
+            # Extract gate_logits when available (DSpark speculative decoding)
+            gate_logits = getattr(model_out, "all_gate_logits", None)
         else:
             hidden_states = model_out[0]
             new_states = model_out[1]
+            gate_logits = model_out[2] if len(model_out) > 2 and _output_gl else None
 
         # Extract telemetry if model returned raw tuple (or via custom properties)
         if hasattr(model_out, "all_c_states"):
@@ -1028,6 +1065,17 @@ class EchoForCausalLM(EchoPreTrainedModel, GenerationMixin):
         # Project using Causal LM head
         logits = self.lm_head(hidden_states)
 
+        # ── Surprise-gate temperature modulation ─────────────────────────
+        # When alpha > 0, the surprise gate λ_t modulates the output logits:
+        #   logits = logits / (1 + α · λ_t)
+        # High surprise flattens the distribution; low surprise leaves it alone.
+        alpha = getattr(self.config, "surprise_temperature_alpha", 0.0)
+        if alpha > 0.0:
+            gate_stats = getattr(model_out, "all_gate_stats", None)
+            if gate_stats is not None and len(gate_stats) > 0:
+                gate_mean = torch.stack(gate_stats).mean(dim=0)  # (B, T)
+                logits = logits / (1.0 + alpha * gate_mean.unsqueeze(-1))
+
         loss = None
         if labels is not None:
             # Shift so that tokens < n predict n
@@ -1038,15 +1086,20 @@ class EchoForCausalLM(EchoPreTrainedModel, GenerationMixin):
 
         if not return_dict:
             output = (logits, new_states)
+            if gate_logits is not None:
+                output = output + (gate_logits,)
             return ((loss,) + output) if loss is not None else output
 
-        return CausalLMOutputWithPast(
+        out = CausalLMOutputWithPast(
             loss=loss,
             logits=logits,
             past_key_values=new_states if use_cache else None,
             hidden_states=(hidden_states,) if output_hidden_states else None,
             attentions=None,
         )
+        if gate_logits is not None:
+            out.all_gate_logits = gate_logits
+        return out
 
     def prepare_inputs_for_generation(
         self, input_ids, past_key_values=None, attention_mask=None, **kwargs
@@ -1220,6 +1273,15 @@ class EchoForSequenceClassification(EchoPreTrainedModel):
         hidden_states = model_out[0]  # (B, T, D)
         new_states = model_out[1]
 
+        # Extract gate_logits when available (DSpark speculative decoding)
+        _output_gl = getattr(self.config, "output_surprise_gate_logits", False)
+        if hasattr(model_out, "all_gate_logits"):
+            gate_logits = model_out.all_gate_logits
+        elif isinstance(model_out, tuple) and len(model_out) > 2 and _output_gl:
+            gate_logits = model_out[2]
+        else:
+            gate_logits = None
+
         # --- Pooling: last non-padding token ---
         if attention_mask is not None:
             # Find the index of the last 1 in each row of attention_mask
@@ -1267,15 +1329,20 @@ class EchoForSequenceClassification(EchoPreTrainedModel):
 
         if not return_dict:
             output = (logits, new_states)
+            if gate_logits is not None:
+                output = output + (gate_logits,)
             return ((loss,) + output) if loss is not None else output
 
-        return SequenceClassifierOutputWithPast(
+        out = SequenceClassifierOutputWithPast(
             loss=loss,
             logits=logits,
             past_key_values=new_states if use_cache else None,
             hidden_states=None,
             attentions=None,
         )
+        if gate_logits is not None:
+            out.all_gate_logits = gate_logits
+        return out
 
     # ------------------------------------------------------------------
     # Convenience inference API

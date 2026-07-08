@@ -142,6 +142,7 @@ class DSRNMemoryInjector(nn.Module):
         h_prev: torch.Tensor,  # (B, D_transformer)  fast state
         c_prev: torch.Tensor,  # (B, D_state)         slow state
         eos_mask: Optional[torch.Tensor] = None,  # (B, T) bool/int
+        return_gate_logits: bool = False,
     ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         """
         Returns
@@ -218,6 +219,8 @@ class DSRNMemoryInjector(nn.Module):
         # linear_read is zero-initialized → no effect at Step 0
         x_out = x + self.linear_read(c_all)  # (B, T, D)
 
+        if return_gate_logits:
+            return x_out, h_new, c_new, gate_logits
         return x_out, h_new, c_new
 
     # ─────────────────────────────────────────────────────────────────────

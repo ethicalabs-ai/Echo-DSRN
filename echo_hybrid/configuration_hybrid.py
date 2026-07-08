@@ -69,6 +69,8 @@ class HybridEchoConfig(Qwen2Config):
         dsrn_use_triton: bool = False,
         gate_bias_init: float = 1.0,
         use_kv_cache: bool = True,  # Kill-switch: False = DSRN-only ablation
+        output_surprise_gate_logits: bool = False,
+        surprise_temperature_alpha: float = 0.0,
         **kwargs,
     ):
         super().__init__(**kwargs)
@@ -77,6 +79,8 @@ class HybridEchoConfig(Qwen2Config):
         self.dsrn_use_triton = dsrn_use_triton
         self.gate_bias_init = gate_bias_init
         self.use_kv_cache = use_kv_cache
+        self.output_surprise_gate_logits = output_surprise_gate_logits
+        self.surprise_temperature_alpha = surprise_temperature_alpha
         self.auto_map = {
             "AutoConfig": "configuration_hybrid.HybridEchoConfig",
             "AutoModel": "modeling_hybrid.HybridEchoModel",
@@ -120,6 +124,8 @@ class Qwen3HybridEchoConfig(Qwen3Config):
         dsrn_use_triton: bool = False,
         gate_bias_init: float = 1.0,
         use_kv_cache: bool = True,
+        output_surprise_gate_logits: bool = False,
+        surprise_temperature_alpha: float = 0.0,
         **kwargs,
     ):
         super().__init__(**kwargs)
@@ -128,6 +134,8 @@ class Qwen3HybridEchoConfig(Qwen3Config):
         self.dsrn_use_triton = dsrn_use_triton
         self.gate_bias_init = gate_bias_init
         self.use_kv_cache = use_kv_cache
+        self.output_surprise_gate_logits = output_surprise_gate_logits
+        self.surprise_temperature_alpha = surprise_temperature_alpha
         self.auto_map = {
             "AutoConfig": "configuration_hybrid.Qwen3HybridEchoConfig",
             "AutoModel": "modeling_hybrid.Qwen3HybridEchoModel",

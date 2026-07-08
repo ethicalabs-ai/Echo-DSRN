@@ -19,6 +19,9 @@ class EchoConfig(PretrainedConfig):
         mlp_bias: bool = False,
         pooling_mode: str = "c_T",
         attention_masking: str = "causal",
+        # --- DSpark speculative decoding integration ---
+        output_surprise_gate_logits: bool = False,
+        surprise_temperature_alpha: float = 0.0,
         # --- Classification fields (optional, ignored by CausalLM) ---
         num_labels: int = 2,
         id2label: Optional[dict] = None,
@@ -56,6 +59,8 @@ class EchoConfig(PretrainedConfig):
         self.mlp_bias = mlp_bias
         self.pooling_mode = pooling_mode
         self.attention_masking = attention_masking
+        self.output_surprise_gate_logits = output_surprise_gate_logits
+        self.surprise_temperature_alpha = surprise_temperature_alpha
         self.classifier_dropout = classifier_dropout
 
         # Standard HF aliases
