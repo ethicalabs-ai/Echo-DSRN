@@ -82,6 +82,7 @@ class HybridEchoModel(Qwen2PreTrainedModel):
         )
         self._dsrn_input_states = []
         self._dsrn_output_states = []
+        self._injector_gate_logits = {}
         self._eos_mask = None
         self._hook_handles = []
         self._register_dsrn_hooks()
@@ -116,6 +117,7 @@ class HybridEchoModel(Qwen2PreTrainedModel):
             h_prev, c_prev = self._dsrn_input_states[injector_idx]
             injector = self.memory_injectors[injector_idx]
             eos_mask = self._eos_mask
+            _output_gl = getattr(self.config, "output_surprise_gate_logits", False)
 
             if self.gradient_checkpointing and self.training:
                 # Wrap the injector in a gradient checkpoint so its intermediate
@@ -123,9 +125,9 @@ class HybridEchoModel(Qwen2PreTrainedModel):
                 # per-injector during backward.  use_reentrant=False is required
                 # for compatibility with torch.compile and nested checkpointing.
                 def injector_fn(hs, h, c):
-                    return injector(hs, h, c, eos_mask=eos_mask)
+                    return injector(hs, h, c, eos_mask=eos_mask, return_gate_logits=_output_gl)
 
-                x_out, h_new, c_new = gradient_checkpoint(
+                result = gradient_checkpoint(
                     injector_fn,
                     hidden_states,
                     h_prev,
@@ -133,7 +135,19 @@ class HybridEchoModel(Qwen2PreTrainedModel):
                     use_reentrant=False,
                 )
             else:
-                x_out, h_new, c_new = injector(hidden_states, h_prev, c_prev, eos_mask=eos_mask)
+                result = injector(
+                    hidden_states,
+                    h_prev,
+                    c_prev,
+                    eos_mask=eos_mask,
+                    return_gate_logits=_output_gl,
+                )
+
+            if _output_gl:
+                x_out, h_new, c_new, gate_logits = result
+                self._injector_gate_logits[injector_idx] = gate_logits
+            else:
+                x_out, h_new, c_new = result
 
             self._dsrn_output_states.append((h_new, c_new))
             if is_bare_tensor:
@@ -229,6 +243,7 @@ class HybridEchoModel(Qwen2PreTrainedModel):
         # HybridEchoCache.  Setting this to [] when use_cache=False (training mode)
         # caused the hook to exit early → injectors bypassed → grad_norm=0.
         self._dsrn_output_states = []
+        self._injector_gate_logits = {}
         self._eos_mask = eos_mask
 
         # ── Qwen2 requires 2D position_ids ────────────────────────────────
@@ -312,10 +327,23 @@ class HybridEchoModel(Qwen2PreTrainedModel):
         self._dsrn_output_states = []
         self._eos_mask = None
 
+        # Collect gate_logits ordered by injector index
+        _gate_logits_list = None
+        if getattr(self.config, "output_surprise_gate_logits", False):
+            _gate_logits_list = [
+                self._injector_gate_logits.get(i) for i in range(self.num_injectors)
+            ]
+        self._injector_gate_logits = {}
+
         if not return_dict:
-            return (backbone_out.last_hidden_state, new_cache)
+            out = (backbone_out.last_hidden_state, new_cache)
+            if _gate_logits_list is not None:
+                out = out + (_gate_logits_list,)
+            return out
 
         backbone_out.past_key_values = new_cache
+        if _gate_logits_list is not None:
+            backbone_out.all_gate_logits = _gate_logits_list
         return backbone_out
 
 
@@ -381,6 +409,9 @@ class HybridEchoForCausalLM(Qwen2PreTrainedModel, GenerationMixin):
         **kwargs,
     ) -> Union[Tuple, CausalLMOutputWithPast]:
         return_dict = return_dict if return_dict is not None else self.config.use_return_dict
+        # Force gate_logits when alpha > 0 (needed for temperature modulation)
+        if getattr(self.config, "surprise_temperature_alpha", 0.0) > 0.0:
+            self.config.output_surprise_gate_logits = True
         outputs = self.model(
             input_ids=input_ids,
             attention_mask=attention_mask,
@@ -401,6 +432,17 @@ class HybridEchoForCausalLM(Qwen2PreTrainedModel, GenerationMixin):
         # to at most _CHUNK_SIZE positions at a time, keeping peak allocation
         # to O(chunk_size × vocab_size) rather than O(batch × seq × vocab_size).
         logits = self.lm_head(hidden_states)
+
+        # ── Surprise-gate temperature modulation ─────────────────────────
+        alpha = getattr(self.config, "surprise_temperature_alpha", 0.0)
+        if alpha > 0.0:
+            gate_logits = getattr(outputs, "all_gate_logits", None)
+            if gate_logits is not None and len(gate_logits) > 0:
+                gate_mean = torch.stack([torch.sigmoid(g).mean(dim=-1) for g in gate_logits]).mean(
+                    dim=0
+                )  # (B, T)
+                logits = logits / (1.0 + alpha * gate_mean.unsqueeze(-1))
+
         loss = None
         if labels is not None:
             shift_logits = logits[..., :-1, :].contiguous()
@@ -427,15 +469,22 @@ class HybridEchoForCausalLM(Qwen2PreTrainedModel, GenerationMixin):
 
         if not return_dict:
             out = (logits,) + (outputs.past_key_values,)
+            gate_logits = getattr(outputs, "all_gate_logits", None)
+            if gate_logits is not None:
+                out = out + (gate_logits,)
             return ((loss,) + out) if loss is not None else out
 
-        return CausalLMOutputWithPast(
+        out = CausalLMOutputWithPast(
             loss=loss,
             logits=logits,
             past_key_values=outputs.past_key_values,
             hidden_states=outputs.hidden_states,
             attentions=outputs.attentions,
         )
+        gate_logits = getattr(outputs, "all_gate_logits", None)
+        if gate_logits is not None:
+            out.all_gate_logits = gate_logits
+        return out
 
     def prepare_inputs_for_generation(
         self,
@@ -534,6 +583,7 @@ class Qwen3HybridEchoModel(Qwen3PreTrainedModel):
         )
         self._dsrn_input_states = []
         self._dsrn_output_states = []
+        self._injector_gate_logits = {}
         self._eos_mask = None
         self._hook_handles = []
         self._register_dsrn_hooks()
@@ -568,13 +618,14 @@ class Qwen3HybridEchoModel(Qwen3PreTrainedModel):
             h_prev, c_prev = self._dsrn_input_states[injector_idx]
             injector = self.memory_injectors[injector_idx]
             eos_mask = self._eos_mask
+            _output_gl = getattr(self.config, "output_surprise_gate_logits", False)
 
             if self.gradient_checkpointing and self.training:
 
                 def injector_fn(hs, h, c):
-                    return injector(hs, h, c, eos_mask=eos_mask)
+                    return injector(hs, h, c, eos_mask=eos_mask, return_gate_logits=_output_gl)
 
-                x_out, h_new, c_new = gradient_checkpoint(
+                result = gradient_checkpoint(
                     injector_fn,
                     hidden_states,
                     h_prev,
@@ -582,7 +633,19 @@ class Qwen3HybridEchoModel(Qwen3PreTrainedModel):
                     use_reentrant=False,
                 )
             else:
-                x_out, h_new, c_new = injector(hidden_states, h_prev, c_prev, eos_mask=eos_mask)
+                result = injector(
+                    hidden_states,
+                    h_prev,
+                    c_prev,
+                    eos_mask=eos_mask,
+                    return_gate_logits=_output_gl,
+                )
+
+            if _output_gl:
+                x_out, h_new, c_new, gate_logits = result
+                self._injector_gate_logits[injector_idx] = gate_logits
+            else:
+                x_out, h_new, c_new = result
 
             self._dsrn_output_states.append((h_new, c_new))
             if is_bare_tensor:
@@ -731,10 +794,23 @@ class Qwen3HybridEchoModel(Qwen3PreTrainedModel):
         self._dsrn_output_states = []
         self._eos_mask = None
 
+        # Collect gate_logits ordered by injector index
+        _gate_logits_list = None
+        if getattr(self.config, "output_surprise_gate_logits", False):
+            _gate_logits_list = [
+                self._injector_gate_logits.get(i) for i in range(self.num_injectors)
+            ]
+        self._injector_gate_logits = {}
+
         if not return_dict:
-            return (backbone_out.last_hidden_state, new_cache)
+            out = (backbone_out.last_hidden_state, new_cache)
+            if _gate_logits_list is not None:
+                out = out + (_gate_logits_list,)
+            return out
 
         backbone_out.past_key_values = new_cache
+        if _gate_logits_list is not None:
+            backbone_out.all_gate_logits = _gate_logits_list
         return backbone_out
 
 
@@ -796,6 +872,9 @@ class Qwen3HybridEchoForCausalLM(Qwen3PreTrainedModel, GenerationMixin):
         **kwargs,
     ) -> Union[Tuple, CausalLMOutputWithPast]:
         return_dict = return_dict if return_dict is not None else self.config.use_return_dict
+        # Force gate_logits when alpha > 0 (needed for temperature modulation)
+        if getattr(self.config, "surprise_temperature_alpha", 0.0) > 0.0:
+            self.config.output_surprise_gate_logits = True
         outputs = self.model(
             input_ids=input_ids,
             attention_mask=attention_mask,
@@ -812,6 +891,17 @@ class Qwen3HybridEchoForCausalLM(Qwen3PreTrainedModel, GenerationMixin):
         )
         hidden_states = outputs.last_hidden_state
         logits = self.lm_head(hidden_states)
+
+        # ── Surprise-gate temperature modulation ─────────────────────────
+        alpha = getattr(self.config, "surprise_temperature_alpha", 0.0)
+        if alpha > 0.0:
+            gate_logits = getattr(outputs, "all_gate_logits", None)
+            if gate_logits is not None and len(gate_logits) > 0:
+                gate_mean = torch.stack([torch.sigmoid(g).mean(dim=-1) for g in gate_logits]).mean(
+                    dim=0
+                )  # (B, T)
+                logits = logits / (1.0 + alpha * gate_mean.unsqueeze(-1))
+
         loss = None
         if labels is not None:
             shift_logits = logits[..., :-1, :].contiguous()
@@ -833,15 +923,22 @@ class Qwen3HybridEchoForCausalLM(Qwen3PreTrainedModel, GenerationMixin):
 
         if not return_dict:
             out = (logits,) + (outputs.past_key_values,)
+            gate_logits = getattr(outputs, "all_gate_logits", None)
+            if gate_logits is not None:
+                out = out + (gate_logits,)
             return ((loss,) + out) if loss is not None else out
 
-        return CausalLMOutputWithPast(
+        out = CausalLMOutputWithPast(
             loss=loss,
             logits=logits,
             past_key_values=outputs.past_key_values,
             hidden_states=outputs.hidden_states,
             attentions=outputs.attentions,
         )
+        gate_logits = getattr(outputs, "all_gate_logits", None)
+        if gate_logits is not None:
+            out.all_gate_logits = gate_logits
+        return out
 
     def prepare_inputs_for_generation(
         self,

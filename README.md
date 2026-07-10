@@ -95,6 +95,63 @@ model = AutoModelForCausalLM.from_pretrained(
 )
 ```
 
+## Surprise-Gate Temperature Modulation (`α`)
+
+Echo-DSRN exposes a novel generation parameter `surprise_temperature_alpha` that couples
+the output token distribution to the model's own internal surprise gate λ_t:
+
+```
+logits = logits / (1 + α · λ_t)
+```
+
+When the model is internally confident (λ_t ≈ 0), the distribution stays sharp.
+When the model detects structural surprise (λ_t ≈ 1), the distribution flattens —
+the model becomes self-aware of its uncertainty without external calibration.
+
+**This is a pure inference parameter** — no fine-tuning or weight changes needed.
+
+```python
+from echo_dsrn import EchoForCausalLM, EchoConfig
+
+config = EchoConfig.from_pretrained("ethicalabs/Echo-DSRN-114M-v0.1.2", trust_remote_code=True)
+config.surprise_temperature_alpha = 1.0  # moderate modulation
+
+model = EchoForCausalLM.from_pretrained(
+    "ethicalabs/Echo-DSRN-114M-v0.1.2",
+    config=config,
+    trust_remote_code=True,
+)
+```
+
+| Model | Recommended α | Effect |
+|-------|--------------|--------|
+| Echo-DSRN-114M | 1.0–2.0 | Breaks repetition loops, adds +3–4 nats entropy |
+| Echo-Hybrid-2B | 0.3–0.5 | Creative writing boost without hallucination |
+
+Higher α values produce more diverse, exploratory output. Lower values stay closer to
+the base model's distribution. Set to 0.0 to disable.
+
+### Speculative Decoding with DSpark
+
+Echo-DSRN's surprise gate doubles as a confidence signal for speculative decoding.
+The `DSparkEchoScheduler` in `echo_dsrn/dspark_scheduler.py` uses α-modulated draft
+tokens with gate-driven dynamic cutoff — no external verification head needed.
+
+```python
+from echo_dsrn.dspark_scheduler import DSparkEchoScheduler, DSparkEchoConfig
+
+scheduler = DSparkEchoScheduler(draft_model, DSparkEchoConfig(
+    max_draft_len=8, tau_load=0.05, surprise_temperature_alpha=1.0,
+))
+draft_ids, confidence = scheduler.draft(input_ids)
+accepted = scheduler.verify(target_model, input_ids, draft_ids,
+                            confidence["cutoff_lens"])
+```
+
+At τ_load=0.05, Echo-DSRN-114M achieves 64% token efficiency when drafting against
+Phi-3-mini-4k-instruct (3.8B target) — the confidence signal correctly identifies
+reliable draft positions.
+
 ## Classification Models
 
 Echo-DSRN ships two classification heads that share the same backbone:

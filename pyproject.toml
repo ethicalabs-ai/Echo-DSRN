@@ -1,12 +1,13 @@
 [project]
 name = "echo-dsrn"
-version = "0.1.3rc6"
+version = "0.1.4"
 description = "Echo-DSRN: Surprise-Gated Dual-State Recurrent Architecture"
 readme = "README.md"
 requires-python = ">=3.10"
 dependencies = [
     "click>=8.3.1",
     "datasets>=2.14.0",
+    "lm-eval[rocm]>=0.5.0.dev1",
     "numpy>=1.21.0",
     "peft>=0.18.0",
     "sentence-transformers>=5.5.1",
