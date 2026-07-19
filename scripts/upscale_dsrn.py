@@ -377,6 +377,7 @@ def main(from_config, to_config, input_model, output_model):
         "special_tokens_map.json",
         "vocab.json",
         "merges.txt",
+        "chat_template.jinja",
     ]:
         src = os.path.join(input_model, filename)
         if os.path.exists(src):
