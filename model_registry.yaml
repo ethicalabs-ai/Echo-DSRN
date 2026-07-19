@@ -66,6 +66,18 @@ models:
           - utils.py
           - __init__.py
 
+  ethicalabs/Echo-DSRN-v0.1.3-Research-Intent-CLF:
+    auto_class: AutoModelForSequenceClassification
+    sources:
+      - dir: echo_dsrn
+        files:
+          - chat_template.jinja
+          - modeling_echo.py
+          - configuration_echo.py
+          - triton_scan.py
+          - utils.py
+          - __init__.py
+
   # ── Echo-Hybrid Models ──────────────────────────────────────────────────
   # Hybrid models need both echo_hybrid/ modules AND echo_dsrn/ modules
   # because dsrn_memory_block.py imports from modeling_echo.py.
@@ -83,7 +95,6 @@ models:
           - dsrn_memory_block.py
       - dir: echo_dsrn
         files:
-          - chat_template.jinja
           - modeling_echo.py
           - configuration_echo.py
           - triton_scan.py
