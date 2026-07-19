@@ -21,6 +21,7 @@ models:
     sources:
       - dir: echo_dsrn
         files:
+          - chat_template.jinja
           - modeling_echo.py
           - configuration_echo.py
           - triton_scan.py
@@ -33,6 +34,7 @@ models:
     sources:
       - dir: echo_dsrn
         files:
+          - chat_template.jinja
           - modeling_echo.py
           - configuration_echo.py
           - triton_scan.py
@@ -45,6 +47,7 @@ models:
     sources:
       - dir: echo_dsrn
         files:
+          - chat_template.jinja
           - modeling_echo.py
           - configuration_echo.py
           - triton_scan.py
@@ -56,6 +59,7 @@ models:
     sources:
       - dir: echo_dsrn
         files:
+          - chat_template.jinja
           - modeling_echo.py
           - configuration_echo.py
           - triton_scan.py
@@ -79,6 +83,7 @@ models:
           - dsrn_memory_block.py
       - dir: echo_dsrn
         files:
+          - chat_template.jinja
           - modeling_echo.py
           - configuration_echo.py
           - triton_scan.py
@@ -91,6 +96,7 @@ models:
     sources:
       - dir: echo_dsrn
         files:
+          - chat_template.jinja
           - modeling_echo.py
           - configuration_echo.py
           - triton_scan.py
