@@ -85,6 +85,18 @@ models:
           - utils.py
           - __init__.py
 
+  # ── DSRN SFT Base Models ────────────────────────────────────────────────
+  ethicalabs/Echo-DSRN-325M-Base:
+    auto_class: AutoModelForCausalLM
+    sources:
+      - dir: echo_dsrn
+        files:
+          - modeling_echo.py
+          - configuration_echo.py
+          - triton_scan.py
+          - utils.py
+          - __init__.py
+
 # ── Excluded models ────────────────────────────────────────────────────────
 # • ethicalabs/Echo-DSRN-v0.1.3-Embed-Exp — SentenceTransformer, synced separately
 # • ethicalabs/Echo-DSRN-v0.1.3 — intermediate training artifact, not published
