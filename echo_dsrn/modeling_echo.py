@@ -1263,6 +1263,11 @@ class EchoForSequenceClassification(EchoPreTrainedModel):
 
         kwargs["position_ids"] = position_ids
 
+        # Force telemetry when alpha > 0 (needed for all_gate_stats)
+        alpha = getattr(self.config, "surprise_temperature_alpha", 0.0)
+        if alpha > 0.0:
+            kwargs["output_dsrn_telemetry"] = True
+
         model_out = self.model(
             input_ids=input_ids,
             past_key_values=past_key_values,
@@ -1310,6 +1315,15 @@ class EchoForSequenceClassification(EchoPreTrainedModel):
         ]
         pooled = self.dropout(pooled)
         logits = self.classifier(pooled)  # (B, num_labels)
+
+        # ── Surprise-gate temperature modulation ─────────────────────────
+        alpha = getattr(self.config, "surprise_temperature_alpha", 0.0)
+        if alpha > 0.0:
+            gate_stats = getattr(model_out, "all_gate_stats", None)
+            if gate_stats is not None and len(gate_stats) > 0:
+                gate_mean = torch.stack(gate_stats).mean(dim=0)  # (B, T)
+                gate_mean = gate_mean.mean(dim=1)  # (B,) — mean across tokens
+                logits = logits / (1.0 + alpha * gate_mean.unsqueeze(-1))
 
         # --- Loss ---
         loss = None
