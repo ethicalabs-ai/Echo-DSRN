@@ -150,17 +150,27 @@ def _patch_all(dst_dir: Path, dry_run: bool) -> int:
 
 
 def _needs_sync(repo_id: str, work_dir: Path, sources: list[dict]) -> bool:
-    """Check whether any source file differs from the HF copy."""
-    for src_entry in sources:
-        src_dir = PROJECT_ROOT / src_entry["dir"]
-        for fname in src_entry["files"]:
-            local_hash = _hash_file(src_dir / fname)
-            remote = work_dir / fname
-            if not remote.exists():
-                return True
-            remote_hash = _hash_file(remote)
-            if local_hash != remote_hash:
-                return True
+    """Check whether any source file differs from the HF copy.
+
+    Compares the PATCHED version of local source (same transforms that
+    sync applies) against the downloaded HF file, because HF files have
+    already been patched during a previous upload.
+    """
+    with tempfile.TemporaryDirectory(prefix="hf-diff-") as tmp:
+        tmp_dir = Path(tmp)
+        for src_entry in sources:
+            src_dir = PROJECT_ROOT / src_entry["dir"]
+            for fname in src_entry["files"]:
+                # Create a patched copy of the local source
+                patched = tmp_dir / fname
+                shutil.copy2(src_dir / fname, patched)
+                _patch_py_file(patched)
+
+                remote = work_dir / fname
+                if not remote.exists():
+                    return True
+                if _hash_file(patched) != _hash_file(remote):
+                    return True
     return False
 
 
