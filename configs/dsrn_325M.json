@@ -13,5 +13,6 @@
     "attention_masking": "causal",
     "pooling_mode": "c_T",
     "output_surprise_gate_logits": true,
-    "surprise_temperature_alpha": 0.0
+    "surprise_temperature_alpha": 0.0,
+    "use_triton": true
 }
