@@ -1,11 +1,18 @@
 import json
 import os
 import shutil
+import sys
+from pathlib import Path
 
 import click
 import torch
 import torch.nn as nn
-from echo_hf.modeling_echo import EchoConfig, EchoForCausalLM
+
+# Resolve local package without requiring pip install
+project_root = Path(__file__).resolve().parent.parent
+sys.path.insert(0, str(project_root))
+from echo_dsrn.configuration_echo import EchoConfig  # noqa: E402
+from echo_dsrn.modeling_echo import EchoForCausalLM  # noqa: E402
 
 # Net2Net Initialization Strategy
 # -------------------------------
@@ -38,6 +45,15 @@ class Net2NetSurgeon:
             print(f"Error loading source model: {e}")
             raise
 
+        # Detect whether source has tied embeddings
+        src_emb = self.source_model.get_input_embeddings().weight
+        src_lm_head = self.source_model.get_output_embeddings().weight
+        self.source_tied = src_emb.data_ptr() == src_lm_head.data_ptr()
+        print(
+            f"Source embedding tied: {self.source_tied}"
+            + (" (same tensor)" if self.source_tied else " (separate weights)")
+        )
+
         # Load Target Config
         print(f"Loading target config from {target_config_path}...")
         try:
@@ -49,6 +65,9 @@ class Net2NetSurgeon:
             with open(target_config_path, "r") as f:
                 config_dict = yaml.safe_load(f)
             self.target_config = EchoConfig(**config_dict)
+
+        # Preserve source's embedding tying behavior
+        self.target_config.tie_word_embeddings = self.source_tied
 
         # Validate
         if self.target_config.vocab_size != self.source_config.vocab_size:
@@ -66,7 +85,8 @@ class Net2NetSurgeon:
 
     def expand_tensor(self, source_tensor, target_shape):
         """
-        Expands a source tensor to target shape using Net2Net padding (zeros for new dims).
+        Expand (or shrink) a source tensor to target shape using Net2Net
+        padding (zeros for new dims) or slicing (for smaller dims).
         """
         with torch.no_grad():
             s_shape = source_tensor.shape
@@ -79,15 +99,16 @@ class Net2NetSurgeon:
             new_tensor = torch.zeros(t_shape, device=self.device, dtype=source_tensor.dtype)
 
             # Slice logic
-            # 1D (Bias, Norm)
             if len(s_shape) == 1:
-                # Copy [0:s_dim]
-                new_tensor[: s_shape[0]] = source_tensor
+                # 1D (Bias, Norm) — copy min(s, t)
+                n = min(s_shape[0], t_shape[0])
+                new_tensor[:n] = source_tensor[:n]
 
-            # 2D (Linear Weight: Out, In)
             elif len(s_shape) == 2:
-                # Copy [0:s_out, 0:s_in]
-                new_tensor[: s_shape[0], : s_shape[1]] = source_tensor
+                # 2D (Linear Weight: Out, In) — copy min
+                n0 = min(s_shape[0], t_shape[0])
+                n1 = min(s_shape[1], t_shape[1])
+                new_tensor[:n0, :n1] = source_tensor[:n0, :n1]
 
             return new_tensor
 
@@ -278,28 +299,36 @@ class Net2NetSurgeon:
         return torch.cat(mapped_chunks, dim=chunk_dim)
 
     def save(self):
-        # Break weight tying for safetensors compatibility
-        # Echo-DSRN typically ties embedding and lm_head
-        if (
-            self.target_model.get_output_embeddings().weight
-            is self.target_model.get_input_embeddings().weight
-        ):
-            print("Breaking weight tying for SafeTensors compatibility...")
-            self.target_model.get_output_embeddings().weight = nn.Parameter(
-                self.target_model.get_output_embeddings().weight.clone()
-            )
+        # If source had tied embeddings but we expanded width asymmetrically,
+        # the target model (built with tie_word_embeddings=True) has them
+        # aliased.  load_state_dict(set, strict=False) writes both keys
+        # to the same underlying tensor, so the last key wins.  To avoid
+        # silently corrupting the embedding with the lm_head values (or vice
+        # versa), we clone one to break the alias AFTER loading.
+        if self.source_tied:
+            out_emb = self.target_model.get_output_embeddings().weight
+            inp_emb = self.target_model.get_input_embeddings().weight
+            if out_emb.data_ptr() == inp_emb.data_ptr():
+                print("Cloning output embeddings to break weight tying for safetensors …")
+                self.target_model.get_output_embeddings().weight = nn.Parameter(out_emb.clone())
 
         print(f"Saving upscaled model to {self.output_path}...")
         self.target_model.save_pretrained(self.output_path)
         self.target_config.save_pretrained(self.output_path)
 
         # Copy modeling files so the output dir is self-contained
-        echo_hf_dir = os.path.dirname(os.path.abspath(__file__))
-        for fname in ["modeling_echo.py", "configuration_echo.py", "triton_scan.py"]:
-            src = os.path.join(echo_hf_dir, fname)
+        echo_dsrn_dir = project_root / "echo_dsrn"
+        for fname in [
+            "modeling_echo.py",
+            "configuration_echo.py",
+            "triton_scan.py",
+            "utils.py",
+            "__init__.py",
+        ]:
+            src = echo_dsrn_dir / fname
             dst = os.path.join(self.output_path, fname)
-            if os.path.exists(src):
-                shutil.copy(src, dst)
+            if src.exists():
+                shutil.copy(str(src), dst)
                 print(f"  Copied {fname}")
 
         print("Done.")
@@ -307,8 +336,14 @@ class Net2NetSurgeon:
 
 
 @click.command()
-@click.option("--from-config", required=True, help="Path to source YAML config")
-@click.option("--to-config", required=True, help="Path to target YAML config")
+@click.option(
+    "--from-config",
+    default=None,
+    help="Path to source config (defaults to input-model/config.json)",
+)
+@click.option(
+    "--to-config", required=True, help="Path to target config JSON (e.g. configs/350M.json)"
+)
 @click.option("--input-model", required=True, help="Path to source model directory")
 @click.option("--output-model", required=True, help="Path to output model directory")
 def main(from_config, to_config, input_model, output_model):
@@ -320,11 +355,21 @@ def main(from_config, to_config, input_model, output_model):
     # 1. Verify paths
     if not os.path.exists(input_model):
         raise FileNotFoundError(f"Input model not found: {input_model}")
+    if not os.path.exists(to_config):
+        raise FileNotFoundError(f"Target config not found: {to_config}")
 
-    # 2. Create output dir
+    # 2. Resolve source config
+    if from_config is None:
+        from_config = os.path.join(input_model, "config.json")
+        if not os.path.exists(from_config):
+            raise FileNotFoundError(
+                f"No config.json in {input_model} — pass --from-config explicitly."
+            )
+
+    # 3. Create output dir
     os.makedirs(output_model, exist_ok=True)
 
-    # 3. Copy Tokenizer (Vocab usually constant)
+    # 4. Copy Tokenizer (Vocab usually constant)
     print("Copying tokenizer files...")
     for filename in [
         "tokenizer.json",
@@ -337,7 +382,7 @@ def main(from_config, to_config, input_model, output_model):
         if os.path.exists(src):
             shutil.copy(src, output_model)
 
-    # 4. Perform Surgery
+    # 5. Perform Surgery
     device = "cuda" if torch.cuda.is_available() else "cpu"
     surgeon = Net2NetSurgeon(input_model, to_config, output_model, device=device)
     surgeon.perform_surgery()
