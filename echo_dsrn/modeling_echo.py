@@ -923,14 +923,21 @@ class EchoForCausalLM(EchoPreTrainedModel, GenerationMixin):
     # tie_word_embeddings=True and get_input/output_embeddings() are both defined.
     _tied_weights_keys = {"lm_head.weight": "model.embedding.weight"}
 
+    # _keys_to_ignore_on_load_missing: some transformers releases (≥5.7)
+    # declare this as a read-only @property, which conflicts with
+    # register_buffer / __setattr__.  We provide a trivial setter
+    # to avoid AttributeError during model.__init__.
+    _keys = []
+
     @property
     def _keys_to_ignore_on_load_missing(self):
-        # When mlp_bias=False (the default, and the setting for all v0.1.2 checkpoints),
-        # bias tensors are not present in the checkpoint and should not trigger warnings.
-        # When mlp_bias=True, these keys WILL exist in the checkpoint — do not silence them.
         if not getattr(self.config, "mlp_bias", False):
             return [r"model\.blocks\.\d+\.mlp_(up|down)\.bias"]
         return []
+
+    @_keys_to_ignore_on_load_missing.setter
+    def _keys_to_ignore_on_load_missing(self, value):
+        self._keys = value
 
     @classmethod
     def from_pretrained(cls, pretrained_model_name_or_path, *args, **kwargs):
