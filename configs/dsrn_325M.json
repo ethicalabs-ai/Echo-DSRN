@@ -1,0 +1,18 @@
+{
+    "architectures": ["EchoForCausalLM"],
+    "model_type": "echo",
+    "num_layers": 12,
+    "hidden_size": 768,
+    "embed_dim": 768,
+    "num_heads": 4,
+    "num_attention_heads": 4,
+    "vocab_size": 32017,
+    "max_position_embeddings": 8192,
+    "rope_theta": 100000.0,
+    "mlp_ratio": 8.0,
+    "attention_masking": "causal",
+    "pooling_mode": "c_T",
+    "output_surprise_gate_logits": true,
+    "surprise_temperature_alpha": 0.0,
+    "use_triton": true
+}
