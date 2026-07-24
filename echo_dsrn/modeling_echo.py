@@ -1004,6 +1004,7 @@ class EchoForCausalLM(EchoPreTrainedModel, GenerationMixin):
         output_hidden_states: Optional[bool] = None,
         return_dict: Optional[bool] = None,
         output_dsrn_telemetry: Optional[bool] = False,
+        skip_logits: Optional[bool] = False,
         **kwargs,
     ) -> Union[Tuple, CausalLMOutputWithPast]:
 
@@ -1069,27 +1070,54 @@ class EchoForCausalLM(EchoPreTrainedModel, GenerationMixin):
             self._latest_c_states = model_out[2]
             self._latest_gate_stats = model_out[3]
 
-        # Project using Causal LM head
-        logits = self.lm_head(hidden_states)
-
-        # ── Surprise-gate temperature modulation ─────────────────────────
-        # When alpha > 0, the surprise gate λ_t modulates the output logits:
-        #   logits = logits / (1 + α · λ_t)
-        # High surprise flattens the distribution; low surprise leaves it alone.
-        alpha = getattr(self.config, "surprise_temperature_alpha", 0.0)
+        # ── Surprise-gate temperature scale (computed once for both paths) ──
+        _surprise_scale = None  # (B, T) or None
         if alpha > 0.0:
             gate_stats = getattr(model_out, "all_gate_stats", None)
             if gate_stats is not None and len(gate_stats) > 0:
-                gate_mean = torch.stack(gate_stats).mean(dim=0)  # (B, T)
-                logits = logits / (1.0 + alpha * gate_mean.unsqueeze(-1))
+                _surprise_scale = 1.0 + alpha * torch.stack(gate_stats).mean(dim=0)  # (B, T)
 
-        loss = None
-        if labels is not None:
-            # Shift so that tokens < n predict n
-            shift_logits = logits[..., :-1, :].contiguous()
+        # ── skip_logits: avoid materialising the full [B, T, V] logits ──
+        if skip_logits and labels is not None:
+            logits = None
+            shift_hidden = hidden_states[..., :-1, :]
             shift_labels = labels[..., 1:].contiguous()
-            loss_fct = nn.CrossEntropyLoss()
-            loss = loss_fct(shift_logits.view(-1, self.config.vocab_size), shift_labels.view(-1))
+            _CHUNK = 512
+            _flat_hidden = shift_hidden.reshape(-1, shift_hidden.size(-1))
+            _flat_labels = shift_labels.reshape(-1)
+            # Shift surprise scale to align with shifted logits
+            _flat_scale = None
+            if _surprise_scale is not None:
+                _flat_scale = _surprise_scale[..., :-1].reshape(-1)  # (B*(T-1),)
+            _loss_fct = nn.CrossEntropyLoss(ignore_index=-100, reduction="sum")
+            _total_loss = torch.zeros((), dtype=torch.float32, device=_flat_hidden.device)
+            _total_tokens = _flat_hidden.new_zeros((), dtype=torch.long)
+            for _i in range(0, _flat_hidden.size(0), _CHUNK):
+                _ch = _flat_hidden[_i : _i + _CHUNK]
+                _cl = self.lm_head(_ch).float()
+                if _flat_scale is not None:
+                    _cl = _cl / _flat_scale[_i : _i + _CHUNK].unsqueeze(-1)
+                _ll = _flat_labels[_i : _i + _CHUNK]
+                _total_loss = _total_loss + _loss_fct(_cl, _ll)
+                _total_tokens = _total_tokens + (_ll != -100).sum()
+            loss = _total_loss / _total_tokens.clamp(min=1)
+        else:
+            # Project using Causal LM head
+            logits = self.lm_head(hidden_states)
+
+            # ── Surprise-gate temperature modulation ─────────────────────────
+            if _surprise_scale is not None:
+                logits = logits / _surprise_scale.unsqueeze(-1)
+
+            loss = None
+            if labels is not None:
+                # Shift so that tokens < n predict n
+                shift_logits = logits[..., :-1, :].contiguous()
+                shift_labels = labels[..., 1:].contiguous()
+                loss_fct = nn.CrossEntropyLoss()
+                loss = loss_fct(
+                    shift_logits.view(-1, self.config.vocab_size), shift_labels.view(-1)
+                )
 
         if not return_dict:
             output = (logits, new_states)
