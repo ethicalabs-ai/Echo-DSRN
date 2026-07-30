@@ -176,6 +176,28 @@ pipe = pipeline("feature-extraction", model="ethicalabs/Echo-DSRN-v0.1.3-Embed-I
 embeddings = pipe("What is the weather today?")
 ```
 
+CPU-only inference (loads instantly, ~220 sent/sec):
+
+```python
+from echo_embedding.modeling_embedding import EchoModelForSentenceEmbedding
+from transformers import AutoTokenizer
+import torch
+
+model = EchoModelForSentenceEmbedding.from_pretrained(
+    "ethicalabs/Echo-DSRN-v0.1.3-Embed-Intent", trust_remote_code=True
+).eval()
+tok = AutoTokenizer.from_pretrained(
+    "ethicalabs/Echo-DSRN-v0.1.3-Embed-Intent", trust_remote_code=True
+)
+
+enc = tok(["What is the weather?", "Will it rain today?"],
+          return_tensors="pt", padding=True, truncation=True)
+with torch.no_grad():
+    out = model(**enc, output_all_states=True)
+    embeddings = out.all_c_all[-1].mean(dim=1)  # mean_c_all pooling
+# → (2, 2048) float32 tensor
+```
+
 ### MTEB Benchmark
 
 | Model | Task | Score |
