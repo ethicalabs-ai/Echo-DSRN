@@ -168,6 +168,12 @@ model = SentenceTransformer(
 )
 embeddings = model.encode(["What is the weather?", "Will it rain today?"])
 # → (2, 2048) float32 tensor
+
+# Or via the HuggingFace pipeline:
+from transformers import pipeline
+
+pipe = pipeline("feature-extraction", model="ethicalabs/Echo-DSRN-v0.1.3-Embed-Intent", trust_remote_code=True)
+embeddings = pipe("What is the weather today?")
 ```
 
 ### MTEB Benchmark
@@ -321,6 +327,11 @@ tok = AutoTokenizer.from_pretrained(
 # classify() passes raw text directly
 label, probs = model.classify("turn off the lights", tokenizer=tok)
 # → iot_hue_lightoff
+
+# Or via pipeline:
+from transformers import pipeline
+pipe = pipeline("text-classification", model="ethicalabs/Echo-DSRN-v0.1.4-Embed-Intent-CLF", trust_remote_code=True)
+pipe("turn off the lights")[0]  # → {'label': 'iot_hue_lightoff', 'score': 0.98}
 ```
 
 #### Path 3: Generative Classifier — `EchoForGenerativeClassification`
