@@ -1237,7 +1237,11 @@ class EchoForSequenceClassification(EchoPreTrainedModel):
 
     def __init__(self, config: EchoConfig):
         super().__init__(config)
-        self.num_labels = getattr(config, "num_labels", 2)
+        # PretrainedConfig.to_dict() strips num_labels — infer from id2label
+        if config.id2label is not None and len(config.id2label) > 0:
+            self.num_labels = len(config.id2label)
+        else:
+            self.num_labels = getattr(config, "num_labels", 2)
         self.model = EchoModel(config)
 
         classifier_dropout = getattr(config, "classifier_dropout", 0.0)
