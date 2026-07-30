@@ -1242,7 +1242,18 @@ class EchoForSequenceClassification(EchoPreTrainedModel):
 
         classifier_dropout = getattr(config, "classifier_dropout", 0.0)
         self.dropout = nn.Dropout(classifier_dropout) if classifier_dropout > 0.0 else nn.Identity()
-        self.classifier = EchoClassifier(config.embed_dim, self.num_labels, bias=True)
+
+        # Classifier head dimension depends on pooling mode
+        pooling_mode = getattr(config, "pooling_mode", None)
+        if pooling_mode == "mean_c_all":
+            head_dim = config.hidden_size * config.num_heads  # c_all: 2048
+        else:
+            head_dim = config.embed_dim  # hidden state: 512
+
+        self.classifier = EchoClassifier(head_dim, self.num_labels, bias=True)
+
+        # Persist pooling mode from config (survives save/load roundtrip)
+        self._pooling_mode = getattr(config, "pooling_mode", None)
 
         self.post_init()
 
@@ -1303,6 +1314,11 @@ class EchoForSequenceClassification(EchoPreTrainedModel):
         if alpha > 0.0:
             kwargs["output_dsrn_telemetry"] = True
 
+        # mean_c_all pooling needs the recurrent slow state per token
+        pooling_mode = getattr(self, "_pooling_mode", None)
+        if pooling_mode in ("mean_c_all", "hybrid"):
+            kwargs["output_all_states"] = True
+
         model_out = self.model(
             input_ids=input_ids,
             past_key_values=past_key_values,
@@ -1322,32 +1338,41 @@ class EchoForSequenceClassification(EchoPreTrainedModel):
         else:
             gate_logits = None
 
-        # --- Pooling: last non-padding token ---
-        if attention_mask is not None:
-            # Find the index of the last 1 in each row of attention_mask
-            seq_lengths = attention_mask.sum(dim=1) - 1  # (B,)
-            seq_lengths = seq_lengths.clamp(min=0)
-        else:
-            # No mask: use the true last token
-            if input_ids is not None:
-                seq_lengths = torch.full(
-                    (hidden_states.size(0),),
-                    hidden_states.size(1) - 1,
-                    dtype=torch.long,
-                    device=hidden_states.device,
+        # --- Pooling ---
+        if pooling_mode == "mean_c_all":
+            # Mean pool the recurrent slow states c_all from the last layer
+            c_all = model_out.all_c_all[-1]  # (B, T, hidden_size * num_heads)
+            if attention_mask is not None:
+                mask_expanded = attention_mask.unsqueeze(-1).expand(c_all.size()).float()
+                pooled = (c_all * mask_expanded).sum(dim=1) / mask_expanded.sum(dim=1).clamp(
+                    min=1e-9
                 )
             else:
-                seq_lengths = torch.full(
-                    (hidden_states.size(0),),
-                    hidden_states.size(1) - 1,
-                    dtype=torch.long,
-                    device=hidden_states.device,
-                )
+                pooled = c_all.mean(dim=1)
+        else:
+            # Default: last non-padding token
+            if attention_mask is not None:
+                seq_lengths = attention_mask.sum(dim=1) - 1  # (B,)
+                seq_lengths = seq_lengths.clamp(min=0)
+            else:
+                if input_ids is not None:
+                    seq_lengths = torch.full(
+                        (hidden_states.size(0),),
+                        hidden_states.size(1) - 1,
+                        dtype=torch.long,
+                        device=hidden_states.device,
+                    )
+                else:
+                    seq_lengths = torch.full(
+                        (hidden_states.size(0),),
+                        hidden_states.size(1) - 1,
+                        dtype=torch.long,
+                        device=hidden_states.device,
+                    )
+            pooled = hidden_states[
+                torch.arange(hidden_states.size(0), device=hidden_states.device), seq_lengths
+            ]  # (B, D)
 
-        # Gather last-token hidden states: (B, D)
-        pooled = hidden_states[
-            torch.arange(hidden_states.size(0), device=hidden_states.device), seq_lengths
-        ]
         pooled = self.dropout(pooled)
         logits = self.classifier(pooled)  # (B, num_labels)
 
@@ -1607,5 +1632,83 @@ class EchoForSequenceClassification(EchoPreTrainedModel):
             clf_model = clf_model.to(src_dtype)
             # Persist in config using the current (non-deprecated) field name
             config.dtype = str(src_dtype).replace("torch.", "")
+
+        return clf_model
+
+    # ──────────────────────────────────────────────────────────────────
+    # from_embedding — convert an embedding model to a classifier
+    # ──────────────────────────────────────────────────────────────────
+    @classmethod
+    def from_embedding(
+        cls,
+        embed_model,
+        num_labels: int = 60,
+        id2label: Optional[dict] = None,
+        label2id: Optional[dict] = None,
+        classifier_dropout: float = 0.0,
+    ) -> "EchoForSequenceClassification":
+        """
+        Construct an :class:`EchoForSequenceClassification` from an
+        :class:`~echo_embedding.modeling_embedding.EchoModelForSentenceEmbedding`
+        instance (or HF path).
+
+        The backbone weights are copied; the pooling mode (``mean_c_all``)
+        is inherited from the embedding model.  The classifier head is
+        **randomly initialised** — this factory is dataset-agnostic.
+        Fine-tune on your target dataset afterward.
+
+        Parameters
+        ----------
+        embed_model:
+            An ``EchoModelForSentenceEmbedding`` instance or a HuggingFace
+            model path / hub ID.
+        num_labels:
+            Number of output classes.
+        id2label:
+            Optional mapping ``{int -> str}`` for label names.
+        label2id:
+            Optional reverse mapping ``{str -> int}``.
+        classifier_dropout:
+            Dropout probability before the classification head.
+
+        Returns
+        -------
+        EchoForSequenceClassification
+        """
+        # ── 1. Resolve the embedding model ─────────────────────────
+        if isinstance(embed_model, str):
+            from echo_embedding.modeling_embedding import EchoModelForSentenceEmbedding
+
+            embed_model = EchoModelForSentenceEmbedding.from_pretrained(
+                embed_model, trust_remote_code=True
+            )
+
+        if id2label is None:
+            id2label = {i: str(i) for i in range(num_labels)}
+        if label2id is None:
+            label2id = {v: k for k, v in id2label.items()}
+
+        # ── 2. Clone config and inject classification fields ──────
+        config = embed_model.config
+        config.num_labels = num_labels
+        config.id2label = id2label
+        config.label2id = label2id
+        config.classifier_dropout = classifier_dropout
+        config.pooling_mode = getattr(config, "pooling_mode", "c_T")
+
+        # ── 3. Build classifier (random init) ─────────────────────
+        clf_model = cls(config)
+
+        # ── 4. Copy backbone weights ──────────────────────────────
+        clf_model.model.load_state_dict(embed_model.model.state_dict(), strict=True)
+
+        # ── 5. Cast to source dtype ───────────────────────────────
+        src_dtype = embed_model.dtype
+        if src_dtype != torch.float32:
+            clf_model = clf_model.to(src_dtype)
+            config.dtype = str(src_dtype).replace("torch.", "")
+
+        # ── 6. Store pooling mode for forward pass ─────────────────
+        clf_model._pooling_mode = getattr(config, "pooling_mode", "c_T")
 
         return clf_model
