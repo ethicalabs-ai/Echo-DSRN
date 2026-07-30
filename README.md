@@ -153,6 +153,34 @@ At τ_load=0.05, Echo-DSRN-114M achieves 64% token efficiency when drafting agai
 Phi-3-mini-4k-instruct (3.8B target) — the confidence signal correctly identifies
 reliable draft positions.
 
+## Embedding Models
+
+Echo-DSRN can be converted to a dense sentence embedding model via
+`EchoModelForSentenceEmbedding`. It pools the recurrent slow state `c_all` across
+tokens (`mean_c_all`, 2048-dim) and is compatible with the `sentence-transformers`
+library.
+
+```python
+from sentence_transformers import SentenceTransformer
+
+model = SentenceTransformer(
+    "ethicalabs/Echo-DSRN-v0.1.3-Embed-Intent", trust_remote_code=True
+)
+embeddings = model.encode(["What is the weather?", "Will it rain today?"])
+# → (2, 2048) float32 tensor
+```
+
+### MTEB Benchmark
+
+| Model | Task | Score |
+|-------|------|-------|
+| [Echo-DSRN-v0.1.3-Embed-Exp](https://huggingface.co/ethicalabs/Echo-DSRN-v0.1.3-Embed-Exp) | STS (7 tasks) | **0.753** avg Spearman |
+| [Echo-DSRN-v0.1.3-Embed-Intent](https://huggingface.co/ethicalabs/Echo-DSRN-v0.1.3-Embed-Intent) | MassiveIntentClassification (51 langs) | **72.42%** accuracy |
+| [Echo-DSRN-v0.1.3-Embed-Intent](https://huggingface.co/ethicalabs/Echo-DSRN-v0.1.3-Embed-Intent) | MassiveScenarioClassification (51 langs) | **79.00%** accuracy |
+
+Both models are available on the Hub. Training is reproducible from the pipeline
+documented in `echo_embedding/`.
+
 ## Classification Models
 
 Echo-DSRN ships two classification heads that share the same backbone:
