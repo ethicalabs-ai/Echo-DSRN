@@ -297,9 +297,15 @@ label, probs = model.classify("turn off the lights", tokenizer=tok)
 
 #### Path 3: Generative Classifier — `EchoForGenerativeClassification`
 
-No linear head. Uses the generative adapter's knowledge via constrained scoring:
-for each candidate label, sum the log-probability of its tokens, then pick the
-highest-scoring one. Used by `Echo-SmolTools-114M-Intent-CLF-Gen` (60-class MASSIVE).
+No classification head — the generative adapter's own token distribution is the classifier.
+
+For each candidate label (e.g., `"weather_query"`), the model sums the
+log-probabilities of its tokens conditioned on the input utterance. The label
+with the highest total log-probability wins. Since the input prefix is identical
+for all candidates, the KV cache is computed once and shared across labels.
+
+**Zero added parameters, zero training** — the same adapter that generates text
+also scores labels. Used by `Echo-SmolTools-114M-Intent-CLF-Gen` (60-class MASSIVE).
 
 See the [Intent Classification](#intent-classification--echoforgenerativeclassification) section above for full documentation.
 
