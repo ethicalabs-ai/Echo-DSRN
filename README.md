@@ -26,6 +26,7 @@ The repository is organized into cleanly separated modules to distinguish core H
 ```
 Echo-DSRN/
 ├── echo_dsrn/           # Core library for the Echo-DSRN model
+├── echo_embedding/      # Embedding model + conversion utilities
 ├── echo_hybrid/         # Core library for the Hybrid model (Qwen2.5 backbone + DSRN memory)
 ├── benchmarks/          # Evaluation scripts for classification models
 ├── examples/            # Interactive inference examples
@@ -240,6 +241,67 @@ uv run python3 scripts/merge_clf_adapter.py \
     --system-prompt "You are a helpful NSFW classification assistant." \
     --user-template "Classify the following text (0 for Safe, 1 for NSFW): {text}"
 ```
+
+### Three paths to build an Echo classifier
+
+`EchoForSequenceClassification` supports two construction paths, plus a generative
+classifier for multi-token labels:
+
+#### Path 1: Causal LM → Classifier (`from_causal_lm()`) — `EchoForSequenceClassification`
+
+Builds on a generative backbone. Used by `Echo-DSRN-v0.1.3-Intent-CLF` (60-class MASSIVE).
+
+- **Pooling:** Last-token hidden state (768-dim fast state)
+- **Inference:** Chat template required — `system_prompt` + `user_template` baked into config
+- **Training:** Frozen backbone → sklearn LogisticRegression → copy weights to `nn.Linear` head
+- **Strength:** Exploits LM-trained surface-form features; ~83% en-US
+
+```python
+from echo_dsrn.modeling_echo import EchoForSequenceClassification
+from transformers import AutoTokenizer
+
+model = EchoForSequenceClassification.from_pretrained(
+    "ethicalabs/Echo-DSRN-v0.1.3-Intent-CLF", trust_remote_code=True
+)
+tok = AutoTokenizer.from_pretrained(
+    "ethicalabs/Echo-DSRN-v0.1.3-Intent-CLF", trust_remote_code=True
+)
+# classify() wraps text in chat template automatically
+label, probs = model.classify("turn off the lights", tokenizer=tok)
+# → iot_hue_lightoff
+```
+
+#### Path 2: Embedding → Classifier (`from_embedding()`)
+
+Builds on an MNRL-trained embedding model. Used by `Echo-DSRN-v0.1.4-Embed-Intent-CLF` (60-class MASSIVE).
+
+- **Pooling:** Mean of recurrent slow states (`mean_c_all`, 2048-dim)
+- **Inference:** Raw text — no chat template (`classification_use_chat_template: false`)
+- **Training:** Sklearn SGDClassifier init (86.49% train acc) + cross-entropy fine-tuning
+- **Strength:** Cross-lingual consistency from MNRL-trained embedding space; ~79% en-US
+
+```python
+from echo_dsrn.modeling_echo import EchoForSequenceClassification
+from transformers import AutoTokenizer
+
+model = EchoForSequenceClassification.from_pretrained(
+    "ethicalabs/Echo-DSRN-v0.1.4-Embed-Intent-CLF", trust_remote_code=True
+)
+tok = AutoTokenizer.from_pretrained(
+    "ethicalabs/Echo-DSRN-v0.1.4-Embed-Intent-CLF", trust_remote_code=True
+)
+# classify() passes raw text directly
+label, probs = model.classify("turn off the lights", tokenizer=tok)
+# → iot_hue_lightoff
+```
+
+#### Path 3: Generative Classifier — `EchoForGenerativeClassification`
+
+No linear head. Uses the generative adapter's knowledge via constrained scoring:
+for each candidate label, sum the log-probability of its tokens, then pick the
+highest-scoring one. Used by `Echo-SmolTools-114M-Intent-CLF-Gen` (60-class MASSIVE).
+
+See the [Intent Classification](#intent-classification--echoforgenerativeclassification) section above for full documentation.
 
 ## Benchmarks & Evaluation
 
