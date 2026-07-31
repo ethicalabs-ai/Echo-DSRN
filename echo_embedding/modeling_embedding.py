@@ -76,7 +76,9 @@ class EchoModelForSentenceEmbedding(EchoPreTrainedModel):
         return_dict = return_dict if return_dict is not None else self.config.use_return_dict
 
         pooling_mode = getattr(self.config, "pooling_mode", "c_T")
-        output_all_states = pooling_mode in ["mean_c_all", "hybrid"]
+        # Support explicit override via kwargs, else use pooling_mode
+        explicit = kwargs.pop("output_all_states", None)
+        output_all_states = explicit if explicit is not None else (pooling_mode in ["mean_c_all", "hybrid"])
 
         # 1. Base model forward pass
         outputs = self.model(
@@ -156,9 +158,15 @@ class EchoModelForSentenceEmbedding(EchoPreTrainedModel):
         if not return_dict:
             return (embeddings_3d, outputs.past_key_values)
 
-        return BaseModelOutputWithPast(
+        result = BaseModelOutputWithPast(
             last_hidden_state=embeddings_3d,
             past_key_values=outputs.past_key_values,
             hidden_states=outputs.hidden_states,
             attentions=outputs.attentions,
         )
+        # Propagate all_c_all / all_h_all from the raw model output
+        if hasattr(outputs, "all_c_all"):
+            result.all_c_all = outputs.all_c_all
+        if hasattr(outputs, "all_h_all"):
+            result.all_h_all = outputs.all_h_all
+        return result

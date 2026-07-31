@@ -26,6 +26,7 @@ The repository is organized into cleanly separated modules to distinguish core H
 ```
 Echo-DSRN/
 ├── echo_dsrn/           # Core library for the Echo-DSRN model
+├── echo_embedding/      # Embedding model + conversion utilities
 ├── echo_hybrid/         # Core library for the Hybrid model (Qwen2.5 backbone + DSRN memory)
 ├── benchmarks/          # Evaluation scripts for classification models
 ├── examples/            # Interactive inference examples
@@ -152,6 +153,62 @@ At τ_load=0.05, Echo-DSRN-114M achieves 64% token efficiency when drafting agai
 Phi-3-mini-4k-instruct (3.8B target) — the confidence signal correctly identifies
 reliable draft positions.
 
+## Embedding Models
+
+Echo-DSRN can be converted to a dense sentence embedding model via
+`EchoModelForSentenceEmbedding`. It pools the recurrent slow state `c_all` across
+tokens (`mean_c_all`, 2048-dim) and is compatible with the `sentence-transformers`
+library.
+
+```python
+from sentence_transformers import SentenceTransformer
+
+model = SentenceTransformer(
+    "ethicalabs/Echo-DSRN-v0.1.3-Embed-Intent", trust_remote_code=True
+)
+embeddings = model.encode(["What is the weather?", "Will it rain today?"])
+# → (2, 2048) float32 tensor
+
+# Or via the HuggingFace pipeline:
+from transformers import pipeline
+
+pipe = pipeline("feature-extraction", model="ethicalabs/Echo-DSRN-v0.1.3-Embed-Intent", trust_remote_code=True)
+embeddings = pipe("What is the weather today?")
+```
+
+CPU-only inference (loads instantly, ~220 sent/sec):
+
+```python
+from echo_embedding.modeling_embedding import EchoModelForSentenceEmbedding
+from transformers import AutoTokenizer
+import torch
+
+model = EchoModelForSentenceEmbedding.from_pretrained(
+    "ethicalabs/Echo-DSRN-v0.1.3-Embed-Intent", trust_remote_code=True
+).eval()
+tok = AutoTokenizer.from_pretrained(
+    "ethicalabs/Echo-DSRN-v0.1.3-Embed-Intent", trust_remote_code=True
+)
+
+enc = tok(["What is the weather?", "Will it rain today?"],
+          return_tensors="pt", padding=True, truncation=True)
+with torch.no_grad():
+    out = model(**enc, output_all_states=True)
+    embeddings = out.all_c_all[-1].mean(dim=1)  # mean_c_all pooling
+# → (2, 2048) float32 tensor
+```
+
+### MTEB Benchmark
+
+| Model | Task | Score |
+|-------|------|-------|
+| [Echo-DSRN-v0.1.3-Embed-Exp](https://huggingface.co/ethicalabs/Echo-DSRN-v0.1.3-Embed-Exp) | STS (7 tasks) | **0.753** avg Spearman |
+| [Echo-DSRN-v0.1.3-Embed-Intent](https://huggingface.co/ethicalabs/Echo-DSRN-v0.1.3-Embed-Intent) | MassiveIntentClassification (51 langs) | **72.42%** accuracy |
+| [Echo-DSRN-v0.1.3-Embed-Intent](https://huggingface.co/ethicalabs/Echo-DSRN-v0.1.3-Embed-Intent) | MassiveScenarioClassification (51 langs) | **79.00%** accuracy |
+
+Both models are available on the Hub. Training is reproducible from the pipeline
+documented in `echo_embedding/`.
+
 ## Classification Models
 
 Echo-DSRN ships two classification heads that share the same backbone:
@@ -240,6 +297,78 @@ uv run python3 scripts/merge_clf_adapter.py \
     --system-prompt "You are a helpful NSFW classification assistant." \
     --user-template "Classify the following text (0 for Safe, 1 for NSFW): {text}"
 ```
+
+### Three paths to build an Echo classifier
+
+`EchoForSequenceClassification` supports two construction paths, plus a generative
+classifier for multi-token labels:
+
+#### Path 1: Causal LM → Classifier (`from_causal_lm()`) — `EchoForSequenceClassification`
+
+Builds on a generative backbone. Used by `Echo-DSRN-v0.1.3-Intent-CLF` (60-class MASSIVE).
+
+- **Pooling:** Last-token hidden state (768-dim fast state)
+- **Inference:** Chat template required — `system_prompt` + `user_template` baked into config
+- **Training:** Frozen backbone → sklearn LogisticRegression → copy weights to `nn.Linear` head
+- **Strength:** Exploits LM-trained surface-form features; ~83% en-US
+
+```python
+from echo_dsrn.modeling_echo import EchoForSequenceClassification
+from transformers import AutoTokenizer
+
+model = EchoForSequenceClassification.from_pretrained(
+    "ethicalabs/Echo-DSRN-v0.1.3-Intent-CLF", trust_remote_code=True
+)
+tok = AutoTokenizer.from_pretrained(
+    "ethicalabs/Echo-DSRN-v0.1.3-Intent-CLF", trust_remote_code=True
+)
+# classify() wraps text in chat template automatically
+label, probs = model.classify("turn off the lights", tokenizer=tok)
+# → iot_hue_lightoff
+```
+
+#### Path 2: Embedding → Classifier (`from_embedding()`)
+
+Builds on an MNRL-trained embedding model. Used by `Echo-DSRN-v0.1.4-Embed-Intent-CLF` (60-class MASSIVE).
+
+- **Pooling:** Mean of recurrent slow states (`mean_c_all`, 2048-dim)
+- **Inference:** Raw text — no chat template (`classification_use_chat_template: false`)
+- **Training:** Sklearn SGDClassifier init (86.49% train acc) + cross-entropy fine-tuning
+- **Strength:** Cross-lingual consistency from MNRL-trained embedding space; ~79% en-US
+
+```python
+from echo_dsrn.modeling_echo import EchoForSequenceClassification
+from transformers import AutoTokenizer
+
+model = EchoForSequenceClassification.from_pretrained(
+    "ethicalabs/Echo-DSRN-v0.1.4-Embed-Intent-CLF", trust_remote_code=True
+)
+tok = AutoTokenizer.from_pretrained(
+    "ethicalabs/Echo-DSRN-v0.1.4-Embed-Intent-CLF", trust_remote_code=True
+)
+# classify() passes raw text directly
+label, probs = model.classify("turn off the lights", tokenizer=tok)
+# → iot_hue_lightoff
+
+# Or via pipeline:
+from transformers import pipeline
+pipe = pipeline("text-classification", model="ethicalabs/Echo-DSRN-v0.1.4-Embed-Intent-CLF", trust_remote_code=True)
+pipe("turn off the lights")[0]  # → {'label': 'iot_hue_lightoff', 'score': 0.98}
+```
+
+#### Path 3: Generative Classifier — `EchoForGenerativeClassification`
+
+No classification head — the generative adapter's own token distribution is the classifier.
+
+For each candidate label (e.g., `"weather_query"`), the model sums the
+log-probabilities of its tokens conditioned on the input utterance. The label
+with the highest total log-probability wins. Since the input prefix is identical
+for all candidates, the KV cache is computed once and shared across labels.
+
+**Zero added parameters, zero training** — the same adapter that generates text
+also scores labels. Used by `Echo-SmolTools-114M-Intent-CLF-Gen` (60-class MASSIVE).
+
+See the [Intent Classification](#intent-classification--echoforgenerativeclassification) section above for full documentation.
 
 ## Benchmarks & Evaluation
 

@@ -305,3 +305,79 @@ def test_dsrn_gate_bf16_saturation_no_nan():
 
     # Forward must be finite
     assert not out[0].isnan().any(), "NaN in forward output"
+
+
+# ── skip_logits correctness ────────────────────────────────────────────────
+
+
+def _forward_loss(model, input_ids, labels, skip_logits):
+    """Run forward and return scalar loss for comparison."""
+    with torch.no_grad():
+        out = model(input_ids=input_ids, labels=labels, skip_logits=skip_logits)
+    return out.loss.detach().float().item()
+
+
+def test_echo_skip_logits_loss_matches_normal(tiny_echo_dsrn):
+    """skip_logits=True must match skip_logits=False when α=0."""
+    torch.manual_seed(42)
+    model = tiny_echo_dsrn
+    input_ids = torch.randint(0, 500, (2, 16))
+    labels = input_ids.clone()
+    labels[:, 0] = -100
+
+    loss_normal = _forward_loss(model, input_ids, labels, skip_logits=False)
+    loss_skip = _forward_loss(model, input_ids, labels, skip_logits=True)
+
+    assert loss_normal == pytest.approx(
+        loss_skip, abs=1e-4
+    ), f"loss mismatch α=0: normal={loss_normal:.6f} skip={loss_skip:.6f}"
+
+
+def test_echo_skip_logits_loss_with_alpha(tiny_echo_dsrn):
+    """skip_logits=True must match skip_logits=False when α>0 (gate modulation)."""
+    torch.manual_seed(42)
+    model = tiny_echo_dsrn
+    model.config.surprise_temperature_alpha = 0.5
+    input_ids = torch.randint(0, 500, (2, 16))
+    labels = input_ids.clone()
+    labels[:, 0] = -100
+
+    loss_normal = _forward_loss(model, input_ids, labels, skip_logits=False)
+    loss_skip = _forward_loss(model, input_ids, labels, skip_logits=True)
+
+    assert loss_normal == pytest.approx(
+        loss_skip, abs=1e-4
+    ), f"loss mismatch α=0.5: normal={loss_normal:.6f} skip={loss_skip:.6f}"
+
+
+def test_hybrid_skip_logits_loss_matches_normal(tiny_echo_hybrid):
+    """skip_logits=True must match skip_logits=False when α=0."""
+    torch.manual_seed(42)
+    model = tiny_echo_hybrid
+    input_ids = torch.randint(0, 500, (2, 16))
+    labels = input_ids.clone()
+    labels[:, 0] = -100
+
+    loss_normal = _forward_loss(model, input_ids, labels, skip_logits=False)
+    loss_skip = _forward_loss(model, input_ids, labels, skip_logits=True)
+
+    assert loss_normal == pytest.approx(
+        loss_skip, abs=1e-4
+    ), f"loss mismatch α=0: normal={loss_normal:.6f} skip={loss_skip:.6f}"
+
+
+def test_hybrid_skip_logits_loss_with_alpha(tiny_echo_hybrid):
+    """skip_logits=True must match skip_logits=False when α>0 (gate modulation)."""
+    torch.manual_seed(42)
+    model = tiny_echo_hybrid
+    model.config.surprise_temperature_alpha = 0.5
+    input_ids = torch.randint(0, 500, (2, 16))
+    labels = input_ids.clone()
+    labels[:, 0] = -100
+
+    loss_normal = _forward_loss(model, input_ids, labels, skip_logits=False)
+    loss_skip = _forward_loss(model, input_ids, labels, skip_logits=True)
+
+    assert loss_normal == pytest.approx(
+        loss_skip, abs=1e-4
+    ), f"loss mismatch α=0.5: normal={loss_normal:.6f} skip={loss_skip:.6f}"
