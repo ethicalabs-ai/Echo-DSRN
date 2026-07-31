@@ -27,6 +27,7 @@ class EchoConfig(PretrainedConfig):
         id2label: Optional[dict] = None,
         label2id: Optional[dict] = None,
         classifier_dropout: float = 0.0,
+        classification_use_chat_template: bool = True,
         **kwargs,
     ):
         # Synchronize hidden_size / embed_dim (HF synonym pair).
