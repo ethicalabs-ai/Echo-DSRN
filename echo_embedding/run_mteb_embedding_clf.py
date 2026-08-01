@@ -70,12 +70,16 @@ class ClassifierEmbeddingWrapper:
 
     def encode(
         self,
-        sentences: List[str],
+        sentences,
         batch_size: Optional[int] = None,
         show_progress_bar: bool = True,
         convert_to_numpy: bool = True,
         **kwargs,
     ) -> np.ndarray:
+        # MTEB passes a DataLoader[BatchedInput], not a plain list
+        if not isinstance(sentences, list):
+            sentences = [text for batch in sentences for text in batch["text"]]
+
         batch_size = batch_size or self.batch_size
         all_embeddings = []
 
@@ -98,6 +102,15 @@ class ClassifierEmbeddingWrapper:
             all_embeddings.append(pooled.cpu().to(torch.float32).numpy())
 
         return np.concatenate(all_embeddings, axis=0)
+
+    # ── MTEB protocol stubs ──────────────────────────────────────
+    def similarity(self, e1, e2):
+        from mteb.similarity_functions import cos_sim
+        return cos_sim(e1, e2)
+
+    def similarity_pairwise(self, e1, e2):
+        from mteb.similarity_functions import pairwise_cos_sim
+        return pairwise_cos_sim(e1, e2)
 
 
 def main():
