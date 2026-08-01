@@ -61,11 +61,11 @@ class ClassifierEmbeddingWrapper:
             self.tokenizer.pad_token = self.tokenizer.eos_token
 
         model_name = os.path.basename(os.path.normpath(model_path))
-        self.mteb_model_meta = ModelMeta(
-            name=f"ethicalabs/{model_name}-embed-backbone",
+        self.mteb_model_meta = ModelMeta.create_empty(
+            name=f"ethicalabs/{model_name}-post-ce",
             revision="no_revision_available",
             languages=["multilingual"],
-            release_date=None,
+            embed_dim=2048,
         )
 
     def encode(
