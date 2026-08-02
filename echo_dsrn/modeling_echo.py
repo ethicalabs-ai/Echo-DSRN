@@ -1702,6 +1702,14 @@ class EchoForSequenceClassification(EchoPreTrainedModel):
         config.pooling_mode = getattr(config, "pooling_mode", "c_T")
         config.classification_use_chat_template = False  # embed→CLF: no chat template
 
+        # Update auto_map so Hub pipeline + AutoModel load correctly
+        config.auto_map = {
+            "AutoConfig": "configuration_echo.EchoConfig",
+            "AutoModel": "modeling_echo.EchoForSequenceClassification",
+            "AutoModelForSequenceClassification": "modeling_echo.EchoForSequenceClassification",
+            "DSRNScan": "triton_scan.DSRNScanTriton",
+        }
+
         # ── 3. Build classifier (random init) ─────────────────────
         clf_model = cls(config)
 
