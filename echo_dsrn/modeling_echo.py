@@ -1465,11 +1465,12 @@ class EchoForSequenceClassification(EchoPreTrainedModel):
 
         self.eval()
 
-        # Format text if baked-in templates exist
+        # Format text if baked-in templates exist AND not disabled
         sys_prompt = getattr(self.config, "system_prompt", None)
         usr_template = getattr(self.config, "user_template", None)
+        use_chat = getattr(self.config, "classification_use_chat_template", True)
 
-        if sys_prompt and usr_template:
+        if use_chat and sys_prompt and usr_template:
             messages = [{"role": "system", "content": sys_prompt}]
             messages.append({"role": "user", "content": usr_template.format(text=text)})
             # Format using the tokenizer's chat template
