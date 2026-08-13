@@ -15,6 +15,7 @@ from transformers import (
 from .configuration_echo import EchoConfig
 from .modeling_echo import EchoForCausalLM, EchoForSequenceClassification, EchoModel
 from .modeling_generative_clf import EchoForGenerativeClassification
+from .pipelines import ChatTextClassificationPipeline, pipeline
 
 # Register with HuggingFace so AutoClass routing works
 AutoConfig.register("echo", EchoConfig)
@@ -27,4 +28,6 @@ __all__ = [
     "EchoForCausalLM",
     "EchoForSequenceClassification",
     "EchoForGenerativeClassification",
+    "ChatTextClassificationPipeline",
+    "pipeline",
 ]

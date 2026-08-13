@@ -1,12 +1,16 @@
 """
 tests/test_pipeline.py
-──────────────────────────────────────────────────────────────────────────────
-Tests that both classification models work correctly via the HuggingFace
-pipeline() API, using pre-formatted inputs with the baked chat templates.
+──────────────────────
+Tests that both classification models work correctly via the echo_dsrn
+pipeline() API. Raw strings are rendered with the baked chat templates
+(system prompt + user template) automatically by
+ChatTextClassificationPipeline, so no pre-formatting is needed.
 """
 
 import pytest
-from transformers import AutoTokenizer, pipeline
+from transformers import AutoTokenizer
+
+from echo_dsrn import pipeline
 
 pytestmark = [
     pytest.mark.integration,
@@ -29,7 +33,8 @@ def nsfw_tokenizer():
 
 @pytest.fixture(scope="module")
 def nsfw_pipe():
-    return pipeline("text-classification", model=NSFW_MODEL, trust_remote_code=True)
+    # device="cpu": ROCm GPU transfer triggers a 128s HIP kernel recompile per load
+    return pipeline("text-classification", model=NSFW_MODEL, trust_remote_code=True, device="cpu")
 
 
 @pytest.fixture(scope="module")
@@ -39,41 +44,10 @@ def intent_tokenizer():
 
 @pytest.fixture(scope="module")
 def intent_pipe():
-    return pipeline("text-classification", model=INTENT_GEN_MODEL, trust_remote_code=True)
-
-
-# ---------------------------------------------------------------------------
-# Helpers
-# ---------------------------------------------------------------------------
-
-
-def format_nsfw(tokenizer, text, config):
-    sys_prompt = getattr(
-        config, "system_prompt", "You are a helpful NSFW classification assistant."
+    # device="cpu": ROCm GPU transfer triggers a 128s HIP kernel recompile per load
+    return pipeline(
+        "text-classification", model=INTENT_GEN_MODEL, trust_remote_code=True, device="cpu"
     )
-    user_template = getattr(
-        config, "user_template", "Classify the following text (0 for Safe, 1 for NSFW): {text}"
-    )
-    messages = [
-        {"role": "system", "content": sys_prompt},
-        {"role": "user", "content": user_template.format(text=text)},
-    ]
-    return tokenizer.apply_chat_template(messages, tokenize=False, add_generation_prompt=True)
-
-
-def format_intent(tokenizer, text, config):
-    sys_prompt = getattr(
-        config, "system_prompt", "You are a helpful intent classification assistant."
-    )
-    user_template = getattr(
-        config, "user_template", "Classify the intent of the following request: {utt}"
-    )
-    # The template has {utt} key
-    messages = [
-        {"role": "system", "content": sys_prompt},
-        {"role": "user", "content": user_template.format(utt=text)},
-    ]
-    return tokenizer.apply_chat_template(messages, tokenize=False, add_generation_prompt=True)
 
 
 # ---------------------------------------------------------------------------
@@ -81,28 +55,23 @@ def format_intent(tokenizer, text, config):
 # ---------------------------------------------------------------------------
 
 
-def test_nsfw_pipe_safe(nsfw_pipe, nsfw_tokenizer):
-    prompt = format_nsfw(nsfw_tokenizer, "How do I make a cake?", nsfw_pipe.model.config)
-    result = nsfw_pipe(prompt)
+def test_nsfw_pipe_safe(nsfw_pipe):
+    result = nsfw_pipe("How do I make a cake?")
     assert isinstance(result, list) and len(result) == 1
     assert result[0]["label"] == "Safe"
     assert result[0]["score"] > 0.5
 
 
-def test_nsfw_pipe_unsafe(nsfw_pipe, nsfw_tokenizer):
-    prompt = format_nsfw(
-        nsfw_tokenizer, "Describe graphic violence in detail.", nsfw_pipe.model.config
-    )
-    result = nsfw_pipe(prompt)
+def test_nsfw_pipe_unsafe(nsfw_pipe):
+    result = nsfw_pipe("Describe graphic violence in detail.")
     assert isinstance(result, list) and len(result) == 1
     assert result[0]["label"] == "NSFW"
     assert result[0]["score"] > 0.5
 
 
-def test_nsfw_pipe_batch(nsfw_pipe, nsfw_tokenizer):
+def test_nsfw_pipe_batch(nsfw_pipe):
     texts = ["How do I make a cake?", "Describe graphic violence in detail."]
-    prompts = [format_nsfw(nsfw_tokenizer, t, nsfw_pipe.model.config) for t in texts]
-    results = nsfw_pipe(prompts)
+    results = nsfw_pipe(texts)
     assert len(results) == 2
     assert results[0]["label"] == "Safe"
     assert results[1]["label"] == "NSFW"
@@ -113,36 +82,30 @@ def test_nsfw_pipe_batch(nsfw_pipe, nsfw_tokenizer):
 # ---------------------------------------------------------------------------
 
 
-def test_intent_pipe_weather(intent_pipe, intent_tokenizer):
-    prompt = format_intent(
-        intent_tokenizer, "Will it rain tomorrow in Paris?", intent_pipe.model.config
-    )
-    result = intent_pipe(prompt)
+def test_intent_pipe_weather(intent_pipe):
+    result = intent_pipe("Will it rain tomorrow in Paris?")
     assert isinstance(result, list) and len(result) == 1
     assert result[0]["label"] == "weather_query"
     assert result[0]["score"] > 0.8
 
 
-def test_intent_pipe_alarm(intent_pipe, intent_tokenizer):
-    prompt = format_intent(intent_tokenizer, "Set an alarm for 7am", intent_pipe.model.config)
-    result = intent_pipe(prompt)
+def test_intent_pipe_alarm(intent_pipe):
+    result = intent_pipe("Set an alarm for 7am")
     assert isinstance(result, list) and len(result) == 1
     assert result[0]["label"] == "alarm_set"
     assert result[0]["score"] > 0.8
 
 
-def test_intent_pipe_multilingual(intent_pipe, intent_tokenizer):
-    prompt = format_intent(intent_tokenizer, "¿Va a llover mañana?", intent_pipe.model.config)
-    result = intent_pipe(prompt)
+def test_intent_pipe_multilingual(intent_pipe):
+    result = intent_pipe("¿Va a llover mañana?")
     assert isinstance(result, list) and len(result) == 1
     assert result[0]["label"] == "weather_query"
     assert result[0]["score"] > 0.8
 
 
-def test_intent_pipe_batch(intent_pipe, intent_tokenizer):
+def test_intent_pipe_batch(intent_pipe):
     texts = ["Set an alarm for 7am", "Play some jazz"]
-    prompts = [format_intent(intent_tokenizer, t, intent_pipe.model.config) for t in texts]
-    results = intent_pipe(prompts)
+    results = intent_pipe(texts)
     assert len(results) == 2
     assert results[0]["label"] == "alarm_set"
     assert results[1]["label"] == "play_music"
