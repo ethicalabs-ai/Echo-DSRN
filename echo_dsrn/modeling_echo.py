@@ -1682,7 +1682,14 @@ class EchoForSequenceClassification(EchoPreTrainedModel):
         """
         # ── 1. Resolve the embedding model ─────────────────────────
         if isinstance(embed_model, str):
-            from echo_embedding.modeling_embedding import EchoModelForSentenceEmbedding
+            # Dynamic import: transformers' trust_remote_code loader statically
+            # scans imports and would require the echo_embedding package, which
+            # is not shipped with classifier checkpoints. Resolve lazily so the
+            # dependency is only needed when this factory is actually used.
+            import importlib
+
+            embedding_module = importlib.import_module("echo_embedding.modeling_embedding")
+            EchoModelForSentenceEmbedding = embedding_module.EchoModelForSentenceEmbedding
 
             embed_model = EchoModelForSentenceEmbedding.from_pretrained(
                 embed_model, trust_remote_code=True

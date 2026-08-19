@@ -183,6 +183,19 @@ from transformers import {auto_class}
 
 repo = {str(work_dir)!r}
 
+# Block host echo_* packages: checkpoints must load with trust_remote_code=True
+# in a bare env (the Hub), with no echo_dsrn / echo_embedding / echo_hybrid /
+# echo_xlstm installed. Simulate that here so missing-package regressions in
+# the shipped modules fail the sync test instead of passing locally.
+class _BlockEchoPackages:
+    def find_spec(self, name, path=None, target=None):
+        if name.split(".")[0] in ("echo_dsrn", "echo_embedding", "echo_hybrid", "echo_xlstm"):
+            raise ImportError(f"No module named '{{name}}' (blocked by sync test)")
+        return None
+
+
+sys.meta_path.insert(0, _BlockEchoPackages())
+
 # Pre-cache all .py files to work around HF dynamic-module-loader bugs
 # with transitive relative imports (hybrid models especially).
 try:
