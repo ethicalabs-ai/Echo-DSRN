@@ -1682,18 +1682,12 @@ class EchoForSequenceClassification(EchoPreTrainedModel):
         """
         # ── 1. Resolve the embedding model ─────────────────────────
         if isinstance(embed_model, str):
-            # Dynamic import: transformers' trust_remote_code loader statically
-            # scans imports and would require the echo_embedding package, which
-            # is not shipped with classifier checkpoints. Resolve lazily so the
-            # dependency is only needed when this factory is actually used.
-            import importlib
+            # The embedding checkpoint ships its own modeling_embedding.py and
+            # routes AutoModel → EchoModelForSentenceEmbedding, so load it via
+            # trust_remote_code — no pip-installed echo_embedding package needed.
+            from transformers import AutoModel
 
-            embedding_module = importlib.import_module("echo_embedding.modeling_embedding")
-            EchoModelForSentenceEmbedding = embedding_module.EchoModelForSentenceEmbedding
-
-            embed_model = EchoModelForSentenceEmbedding.from_pretrained(
-                embed_model, trust_remote_code=True
-            )
+            embed_model = AutoModel.from_pretrained(embed_model, trust_remote_code=True)
 
         if id2label is None:
             id2label = {i: str(i) for i in range(num_labels)}
