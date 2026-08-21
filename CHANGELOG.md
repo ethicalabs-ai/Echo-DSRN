@@ -4,6 +4,26 @@ All notable changes to Echo-DSRN-HF are documented here.
 
 ---
 
+## [0.1.9] — 2026-08-21
+
+### Fixed
+
+- **`surprise_lambda_init` is now honored by the HF wrapper.** Previously the
+  config key was ignored and `surprise_lambda` was hardcoded to zero at
+  initialization; the model now initializes it to `config.surprise_lambda_init`
+  (default `0.0`, preserving prior behavior). This makes the trainer CLI and the
+  HF wrapper agree on one source of truth, which is load-bearing for pre-training
+  convergence (see the gate-bias/surprise-lambda init sweep in the Echo-DSRN
+  pre-training protocol).
+- **`eos_mask` now threads through the pure-DSRN forward path** (previously only
+  the hybrid path wired it). The parallel-scan kernels wipe the fast state and
+  suppress slow-state writes at document boundaries, and zero the inter-chunk
+  carry when a chunk ends on EOS — preventing recurrent state from leaking across
+  documents in TBPTT pre-training (`--mask_eos` now behaves as documented in
+  `docs/pretrain_echo_tiny.md`).
+
+---
+
 ## [0.1.3a] — 2026-05-17
 
 ### Fixed
