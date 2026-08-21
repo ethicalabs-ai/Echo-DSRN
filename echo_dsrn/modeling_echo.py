@@ -633,10 +633,11 @@ class DSRNBlock(nn.Module):
             pass
 
         output_gate_logits = kwargs.get("output_gate_logits", False)
+        eos_mask = kwargs.get("eos_mask", None)
 
         # Use Parallel Kernel
         x_out, h_new, c_new, gate_stats, h_all, c_all, gate_logits = dsrn_parallel_kernel(
-            self, x, h_prev, c_prev
+            self, x, h_prev, c_prev, eos_mask=eos_mask
         )
 
         if self.use_hybrid_attention:
@@ -742,7 +743,7 @@ class EchoModel(EchoPreTrainedModel):
             else:
                 nn.init.orthogonal_(block.linear_pred.weight, gain=0.1)
 
-            nn.init.zeros_(block.surprise_lambda)
+            nn.init.constant_(block.surprise_lambda, getattr(config, "surprise_lambda_init", 0.0))
             # CRITICAL: Zero-Init Residual Output (Identity Start)
             nn.init.zeros_(block.mlp_down.weight)
             if block.mlp_down.bias is not None:
