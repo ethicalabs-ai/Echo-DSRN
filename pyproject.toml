@@ -1,6 +1,6 @@
 [project]
 name = "echo-dsrn"
-version = "0.1.9"
+version = "0.1.10"
 description = "Echo-DSRN: Surprise-Gated Dual-State Recurrent Architecture"
 readme = "README.md"
 requires-python = ">=3.10"
@@ -12,7 +12,7 @@ dependencies = [
     "peft>=0.17.0",
     "sentence-transformers>=5.5.1",
     "tqdm>=4.60.0",
-    "transformers>=5.14.1",
+    "transformers>=5.15.0",
     "trl>=0.25.1",
     "wandb>=0.16.0",
 ]
@@ -20,13 +20,13 @@ dependencies = [
 [project.optional-dependencies]
 # CPU-only build — used in CI (uv sync --extra cpu)
 cpu = [
-    "torch>=2.10.0",
+    "torch>=2.13.0",
     "torchvision>=0.25.0",
     "torchaudio>=2.10.0",
 ]
 # ROCm build — used locally (uv sync --extra rocm)
 rocm = [
-    "torch>=2.10.0",
+    "torch>=2.13.0",
     "torchvision>=0.25.0",
     "torchaudio>=2.10.0",
     "bitsandbytes>=0.46.1",

@@ -563,13 +563,42 @@ class SlidingWindowAttention(nn.Module):
             # Replace -inf with 0 for the permitted window (float mask expected by sdpa)
             mask = torch.where(mask == float("-inf"), mask, torch.zeros_like(mask))
 
-            y = attn_fn(q, k, v, attn_mask=mask.unsqueeze(0).unsqueeze(0))
+            # Block attention to padding tokens.  The input attention_mask is
+            # only present on the plain transformers/ST path (padded batches);
+            # vLLM's pooling runner never passes one (its flattened batches
+            # are unpadded), so this is a no-op there.
+            mask4 = mask.unsqueeze(0).unsqueeze(0)  # (1, 1, T, kv)
+            input_mask = kwargs.get("attention_mask")
+            if input_mask is not None and self.attention_masking == "non_causal_window":
+                key_blocked = input_mask.bool().unsqueeze(1).unsqueeze(1)  # (B, 1, 1, T)
+                mask4 = mask4.masked_fill(~key_blocked, float("-inf"))
+
+            y = self._attn_call(attn_fn, q, k, v, mask4, is_causal=False)
         else:
             # Decoding: Recurrent step, attend only to the last window_size tokens
-            y = attn_fn(q, k_attn, v_attn, is_causal=False)
+            y = self._attn_call(attn_fn, q, k_attn, v_attn, None, is_causal=False)
 
         y = y.transpose(1, 2).contiguous().view(B, T, C)
         return self.out_proj(y), current_key_value
+
+    def _attn_call(self, attn_fn, q, k, v, mask, is_causal):
+        """Call the attention function with a signature that works under both
+        plain torch and vLLM's attention dispatch.
+
+        When running under vLLM, ``ALL_ATTENTION_FUNCTIONS`` is vLLM's own
+        registry whose functions take the module as the first positional
+        argument (``(module, query, key, value, attention_mask, ...)``) and
+        return a ``(output, None)`` tuple — the same convention as
+        transformers 5.x. Under plain torch the registry is empty and the
+        call falls through to ``torch.nn.functional.scaled_dot_product_attention``
+        with the native ``attn_mask`` keyword.
+        """
+        if ALL_ATTENTION_FUNCTIONS:  # vLLM attention dispatch (module-first)
+            out = attn_fn(self, q, k, v, mask, is_causal=is_causal)
+            return out[0] if isinstance(out, tuple) else out
+        if mask is not None:
+            return attn_fn(q, k, v, attn_mask=mask)
+        return attn_fn(q, k, v, is_causal=is_causal)
 
 
 class DSRNBlock(nn.Module):
@@ -1209,6 +1238,193 @@ class EchoClassifier(nn.Linear):
         return res
 
 
+def _flattened_segment_mask(position_ids, input_ids, attention_mask):
+    """Detect vLLM's flattened-batch segment boundaries.
+
+    vLLM's Transformers backend concatenates every sequence scheduled in a
+    step into one ``[1, N]`` forward and does not pass an ``attention_mask``;
+    each sequence's ``position_ids`` restart at 0.  Returns the per-token
+    boolean ``new_seq`` mask (True at each sequence's first token) when this
+    mode is detected with more than one segment, otherwise ``None`` so callers
+    keep the plain-mask behavior.
+    """
+    if attention_mask is not None or position_ids is None or input_ids is None:
+        return None
+    if input_ids.ndim != 2 or input_ids.shape[0] != 1 or position_ids.shape != input_ids.shape:
+        return None
+    new_seq = position_ids == 0  # (1, N) — True at each sequence's first token
+    if int(new_seq.sum()) < 2:
+        return None
+    return new_seq
+
+
+def _pool_hidden_states(outputs, pooling_mode, attention_mask):
+    """Pool a model output's recurrent/hidden states into per-sequence vectors.
+
+    Shared by the sentence-embedding adapter and :class:`EchoModelForPooling`:
+    ``mean_c_all`` averages the last layer's slow recurrent states,
+    ``mean_x_out`` averages the final hidden state, ``hybrid`` concatenates
+    the fast and slow means, and the default ``c_T`` takes the final recurrent
+    state from the cache.
+    """
+
+    def mean_pooling(token_embeddings, mask):
+        input_mask_expanded = mask.unsqueeze(-1).expand(token_embeddings.size()).float()
+        sum_embeddings = torch.sum(token_embeddings * input_mask_expanded, 1)
+        sum_mask = input_mask_expanded.sum(1)
+        sum_mask = torch.clamp(sum_mask, min=1e-9)
+        return sum_embeddings / sum_mask
+
+    if pooling_mode == "mean_c_all":
+        c_all = outputs.all_c_all[-1]  # shape: (Batch, Seq_Len, State_Dim)
+        if attention_mask is not None:
+            return mean_pooling(c_all, attention_mask)
+        return c_all.mean(dim=1)
+    if pooling_mode == "mean_x_out":
+        last_hidden_state = outputs.last_hidden_state
+        if attention_mask is not None:
+            return mean_pooling(last_hidden_state, attention_mask)
+        return last_hidden_state.mean(dim=1)
+    if pooling_mode == "hybrid":
+        h_all = outputs.all_h_all[-1]
+        c_all = outputs.all_c_all[-1]
+        if attention_mask is not None:
+            pooled_h = mean_pooling(h_all, attention_mask)
+            pooled_c = mean_pooling(c_all, attention_mask)
+        else:
+            pooled_h = h_all.mean(dim=1)
+            pooled_c = c_all.mean(dim=1)
+        return torch.cat([pooled_h, pooled_c], dim=-1)
+    # "c_T" (default baseline behavior)
+    past = outputs.past_key_values
+    if hasattr(past, "__getitem__"):
+        last_layer_state = past[-1]
+    elif hasattr(past, "states"):  # EchoCache support
+        last_layer_state = past.states[-1]
+    else:
+        raise ValueError("Could not extract recurrent state from model cache.")
+    return last_layer_state[1]  # shape: (Batch, State_Dim)
+
+
+class EchoModelForPooling(EchoModel):
+    """EchoModel variant that returns per-sequence pooled embeddings.
+
+    The forward runs the standard recurrent scan and returns the pooled
+    vector broadcast to every token position, so vLLM's pooling runner
+    extracts one vector per sequence from the hidden states.  The module tree
+    is identical to :class:`EchoModel` (``embedding``/``blocks``/``final_norm``
+    as direct children), which is what keeps checkpoint keys ``model.blocks.*``
+    resolvable through vLLM's weight mapper — set
+    ``auto_map["AutoModel"]`` to this class for embed-backbone classifiers
+    served with ``--convert classify``.
+    """
+
+    _supports_attention_backend = True
+
+    def forward(
+        self,
+        input_ids: Optional[torch.LongTensor] = None,
+        past_key_values: Optional[List[Tuple[torch.Tensor, torch.Tensor]]] = None,
+        inputs_embeds: Optional[torch.FloatTensor] = None,
+        position_ids: Optional[torch.LongTensor] = None,
+        output_dsrn_telemetry: Optional[bool] = False,
+        output_attentions: Optional[bool] = None,
+        output_hidden_states: Optional[bool] = None,
+        return_dict: Optional[bool] = None,
+        output_all_states: Optional[bool] = None,
+        attention_mask: Optional[torch.LongTensor] = None,
+        **kwargs,
+    ) -> Union[Tuple, BaseModelOutputWithPast]:
+        return_dict = (
+            return_dict
+            if return_dict is not None
+            else getattr(self.config, "use_return_dict", True)
+        )
+        pooling_mode = getattr(self.config, "pooling_mode", "c_T")
+        output_all_states = (
+            output_all_states
+            if output_all_states is not None
+            else (pooling_mode in ("mean_c_all", "hybrid"))
+        )
+
+        new_seq = _flattened_segment_mask(position_ids, input_ids, attention_mask)
+        if new_seq is not None:
+            # vLLM flattens the whole step into one [1, N] forward.  The DSRN
+            # recurrence cannot reset mid-forward, so each segment runs with
+            # fresh state and the pooled vectors are stitched back together.
+            seg_ids = torch.cumsum(new_seq.long(), dim=1) - 1
+            num_segs = int(seg_ids.max().item()) + 1
+            seg_outputs = []
+            for i in range(num_segs):
+                sel = seg_ids[0] == i
+                seg_outputs.append(
+                    self.forward(
+                        input_ids=input_ids[:, sel],
+                        position_ids=position_ids[:, sel],
+                        **kwargs,
+                    )
+                )
+            if not return_dict:
+                return (
+                    torch.cat([o[0] for o in seg_outputs], dim=1),
+                    seg_outputs[-1][1],
+                )
+            result = BaseModelOutputWithPast(
+                last_hidden_state=torch.cat([o.last_hidden_state for o in seg_outputs], dim=1),
+                past_key_values=seg_outputs[-1].past_key_values,
+            )
+            if hasattr(seg_outputs[0], "all_c_all") and seg_outputs[0].all_c_all is not None:
+                result.all_c_all = [
+                    torch.cat([o.all_c_all[layer_idx] for o in seg_outputs], dim=1)
+                    for layer_idx in range(len(seg_outputs[0].all_c_all))
+                ]
+            if hasattr(seg_outputs[0], "all_h_all") and seg_outputs[0].all_h_all is not None:
+                result.all_h_all = [
+                    torch.cat([o.all_h_all[layer_idx] for o in seg_outputs], dim=1)
+                    for layer_idx in range(len(seg_outputs[0].all_h_all))
+                ]
+            return result
+
+        outputs = super().forward(
+            input_ids=input_ids,
+            past_key_values=past_key_values,
+            inputs_embeds=inputs_embeds,
+            position_ids=position_ids,
+            attention_mask=attention_mask,
+            output_dsrn_telemetry=output_dsrn_telemetry,
+            output_attentions=output_attentions,
+            output_hidden_states=output_hidden_states,
+            return_dict=True,
+            output_all_states=output_all_states,
+            **kwargs,
+        )
+
+        if input_ids is not None:
+            seq_len = input_ids.shape[1]
+        elif inputs_embeds is not None:
+            seq_len = inputs_embeds.shape[1]
+        else:
+            seq_len = 1
+
+        pooled = _pool_hidden_states(outputs, pooling_mode, attention_mask)
+        embeddings_3d = pooled.unsqueeze(1).expand(-1, seq_len, -1)
+
+        if not return_dict:
+            return embeddings_3d, outputs.past_key_values
+
+        result = BaseModelOutputWithPast(
+            last_hidden_state=embeddings_3d,
+            past_key_values=outputs.past_key_values,
+            hidden_states=outputs.hidden_states,
+            attentions=outputs.attentions,
+        )
+        if hasattr(outputs, "all_c_all"):
+            result.all_c_all = outputs.all_c_all
+        if hasattr(outputs, "all_h_all"):
+            result.all_h_all = outputs.all_h_all
+        return result
+
+
 class EchoForSequenceClassification(EchoPreTrainedModel):
     """
     Echo-DSRN with a sequence-level classification head.
@@ -1235,6 +1451,7 @@ class EchoForSequenceClassification(EchoPreTrainedModel):
 
     # Do NOT add GenerationMixin — this model must not generate text.
     main_input_name = "input_ids"
+    _supports_attention_backend = True
 
     def __init__(self, config: EchoConfig):
         super().__init__(config)
@@ -1704,10 +1921,15 @@ class EchoForSequenceClassification(EchoPreTrainedModel):
         config.pooling_mode = getattr(config, "pooling_mode", "c_T")
         config.classification_use_chat_template = False  # embed→CLF: no chat template
 
-        # Update auto_map so Hub pipeline + AutoModel load correctly
+        # Update auto_map so Hub pipeline + AutoModel load correctly.
+        # AutoModel routes to EchoModelForPooling (tree identical to EchoModel,
+        # so vLLM's weight mapper resolves ``model.blocks.*`` checkpoint keys,
+        # and its forward returns per-sequence pooled embeddings that the
+        # wrapper's classifier head consumes).  Same pattern as the v0.1.3
+        # classifier's AutoModel → EchoModel.
         config.auto_map = {
             "AutoConfig": "configuration_echo.EchoConfig",
-            "AutoModel": "modeling_echo.EchoForSequenceClassification",
+            "AutoModel": "modeling_echo.EchoModelForPooling",
             "AutoModelForSequenceClassification": "modeling_echo.EchoForSequenceClassification",
             "DSRNScan": "triton_scan.DSRNScanTriton",
         }
