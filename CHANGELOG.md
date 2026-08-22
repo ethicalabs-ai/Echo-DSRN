@@ -4,6 +4,55 @@ All notable changes to Echo-DSRN-HF are documented here.
 
 ---
 
+## [0.1.10] — 2026-08-22
+
+### Added
+
+- **vLLM pooling-runner serving for the embedding models.** New
+  `echo-embed` compose service (port 8003) serves `Echo-DSRN-v0.1.3-Embed-Exp`
+  through vLLM 0.27.1's pooling runner (`--convert embed`), replacing the
+  SentenceTransformer-based service.
+- **`EchoModelForPooling`.** A pooling adapter whose module tree is identical
+  to `EchoModel` — keeping `model.blocks.*` checkpoint keys resolvable through
+  vLLM's weight mapper — while its forward returns per-sequence pooled
+  embeddings broadcast to every token. `from_embedding()` now routes
+  `auto_map["AutoModel"]` to it, unblocking embed-backbone classifiers
+  (`Echo-DSRN-v0.1.4-Embed-Intent-CLF`) on vLLM.
+- **vLLM backend registration.** The embedding/classification classes expose
+  `_supports_attention_backend`, clearing vLLM's architecture validation.
+
+### Fixed
+
+- **Batched embeddings collided under vLLM.** The Transformers backend runs
+  each step as one flattened `[1, N]` forward with `position_ids` restarting
+  per sequence and no `attention_mask`, so the DSRN pooled `c_all` over all
+  sequences — every item in a batch received the same vector. Segment
+  boundaries are now detected from the `position_ids` resets and each segment
+  runs as its own forward with fresh state.
+- **Padding polluted the non-causal attention on the plain/ST path.** The
+  bidirectional (`non_causal_window`) attention now blocks pad key-positions
+  from the input `attention_mask` (a no-op under vLLM, which never passes
+  one), the embedding adapters forward `attention_mask` into the base model,
+  and the embed-family tokenizers right-pad (`padding_side: right`) so the
+  recurrence no longer processes pad tokens before the text. Padded ST
+  batches now match single requests exactly.
+- **DSRN attention adapted to vLLM 0.27 module-first dispatch** (`_attn_call`),
+  and the default hybrid service pinned to GPU 0.
+
+### Changed
+
+- **Dependency floors raised for the vLLM 0.27.1 serving stack:**
+  `transformers>=5.15.0` (was 5.14.1) and `torch>=2.13.0` (was 2.10.0, both
+  CPU and ROCm extras).
+- **Port 8002 default intent classifier is now the embed-backbone
+  `Echo-DSRN-v0.1.4-Embed-Intent-CLF`** (compose default + README), served via
+  the pooling runner; the LM-based `Echo-DSRN-v0.1.3-Intent-CLF` remains
+  available as a fallback.
+- Registry sync keeps sentence-transformers repos out (their modules are
+  pushed manually).
+
+---
+
 ## [0.1.9] — 2026-08-21
 
 ### Fixed
