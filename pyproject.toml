@@ -12,7 +12,7 @@ dependencies = [
     "peft>=0.17.0",
     "sentence-transformers>=5.5.1",
     "tqdm>=4.60.0",
-    "transformers>=5.14.1",
+    "transformers>=5.14.1,<5.15",
     "trl>=0.25.1",
     "wandb>=0.16.0",
 ]

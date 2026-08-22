@@ -563,13 +563,32 @@ class SlidingWindowAttention(nn.Module):
             # Replace -inf with 0 for the permitted window (float mask expected by sdpa)
             mask = torch.where(mask == float("-inf"), mask, torch.zeros_like(mask))
 
-            y = attn_fn(q, k, v, attn_mask=mask.unsqueeze(0).unsqueeze(0))
+            y = self._attn_call(attn_fn, q, k, v, mask.unsqueeze(0).unsqueeze(0), is_causal=False)
         else:
             # Decoding: Recurrent step, attend only to the last window_size tokens
-            y = attn_fn(q, k_attn, v_attn, is_causal=False)
+            y = self._attn_call(attn_fn, q, k_attn, v_attn, None, is_causal=False)
 
         y = y.transpose(1, 2).contiguous().view(B, T, C)
         return self.out_proj(y), current_key_value
+
+    def _attn_call(self, attn_fn, q, k, v, mask, is_causal):
+        """Call the attention function with a signature that works under both
+        plain torch and vLLM's attention dispatch.
+
+        When running under vLLM, ``ALL_ATTENTION_FUNCTIONS`` is vLLM's own
+        registry whose functions take the module as the first positional
+        argument (``(module, query, key, value, attention_mask, ...)``) and
+        return a ``(output, None)`` tuple — the same convention as
+        transformers 5.x. Under plain torch the registry is empty and the
+        call falls through to ``torch.nn.functional.scaled_dot_product_attention``
+        with the native ``attn_mask`` keyword.
+        """
+        if ALL_ATTENTION_FUNCTIONS:  # vLLM attention dispatch (module-first)
+            out = attn_fn(self, q, k, v, mask, is_causal=is_causal)
+            return out[0] if isinstance(out, tuple) else out
+        if mask is not None:
+            return attn_fn(q, k, v, attn_mask=mask)
+        return attn_fn(q, k, v, is_causal=is_causal)
 
 
 class DSRNBlock(nn.Module):

@@ -684,7 +684,7 @@ wheels = [
 
 [[package]]
 name = "echo-dsrn"
-version = "0.1.8"
+version = "0.1.9"
 source = { editable = "." }
 dependencies = [
     { name = "click" },
@@ -741,7 +741,7 @@ requires-dist = [
     { name = "torchvision", marker = "extra == 'cpu'", specifier = ">=0.25.0", index = "https://download.pytorch.org/whl/cpu", conflict = { package = "echo-dsrn", extra = "cpu" } },
     { name = "torchvision", marker = "extra == 'rocm'", specifier = ">=0.25.0", index = "https://download.pytorch.org/whl/rocm7.2/", conflict = { package = "echo-dsrn", extra = "rocm" } },
     { name = "tqdm", specifier = ">=4.60.0" },
-    { name = "transformers", specifier = ">=5.14.1" },
+    { name = "transformers", specifier = ">=5.14.1,<5.15" },
     { name = "triton-rocm", marker = "extra == 'rocm'", index = "https://download.pytorch.org/whl/rocm7.2/" },
     { name = "trl", specifier = ">=0.25.1" },
     { name = "wandb", specifier = ">=0.16.0" },
