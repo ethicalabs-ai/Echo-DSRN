@@ -22,6 +22,8 @@ class EchoModelForSentenceEmbedding(EchoPreTrainedModel):
     for sentence-transformers compatibility.
     """
 
+    _supports_attention_backend = True
+
     def __init__(self, config: EchoConfig):
         super().__init__(config)
         self.model = EchoModel(config)
@@ -78,7 +80,9 @@ class EchoModelForSentenceEmbedding(EchoPreTrainedModel):
         pooling_mode = getattr(self.config, "pooling_mode", "c_T")
         # Support explicit override via kwargs, else use pooling_mode
         explicit = kwargs.pop("output_all_states", None)
-        output_all_states = explicit if explicit is not None else (pooling_mode in ["mean_c_all", "hybrid"])
+        output_all_states = (
+            explicit if explicit is not None else (pooling_mode in ["mean_c_all", "hybrid"])
+        )
 
         # 1. Base model forward pass
         outputs = self.model(

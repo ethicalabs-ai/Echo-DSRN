@@ -96,6 +96,34 @@ model = AutoModelForCausalLM.from_pretrained(
 )
 ```
 
+## Serving with vLLM (OpenAI-compatible API)
+
+Echo-DSRN and Echo-Hybrid serve **natively in vLLM** (≥ 0.27) on ROCm via
+`trust_remote_code` — no custom engine, no plugins. The surprise-gated
+recurrent state is preserved through vLLM's decode loop (use `--enforce-eager`;
+CUDA-graph capture would freeze the recurrent state and wipe memory each step).
+
+The full serving stack runs from `docker-compose.yml` (vLLM ROCm base image):
+
+| Port | Service | Default model | API |
+|---|---|---|---|
+| 8001 | chat / tool-calling | `mrs83/Kurtis-EON1-Hybrid-2B-v0.1.2` | `/v1/chat/completions` |
+| 8002 | intent classification | `ethicalabs/Echo-DSRN-v0.1.4-Embed-Intent-CLF` | `/classify` |
+| 8003 | sentence embeddings | `ethicalabs/Echo-DSRN-v0.1.3-Embed-Exp` | `/v1/embeddings` |
+
+```bash
+docker compose up -d            # builds the ROCm images, serves all three
+curl http://localhost:8001/v1/chat/completions \
+  -H "Content-Type: application/json" \
+  -d '{"model":"echo-hybrid","messages":[{"role":"user","content":"Hello!"}]}'
+```
+
+Model choices are overridable via environment variables (`HYBRID_MODEL`,
+`INTENT_MODEL`, `EMBED_MODEL`) or the repo-local `.env` file (gitignored).
+The classifier and chat services run on vLLM's pooling/generation runners;
+the embedding service uses sentence-transformers on the same ROCm base
+(Echo embedding checkpoints are sentence-transformers-format repos).
+
 ## Surprise-Gate Temperature Modulation (`α`)
 
 Echo-DSRN exposes a novel generation parameter `surprise_temperature_alpha` that couples

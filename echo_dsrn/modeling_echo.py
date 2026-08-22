@@ -1254,6 +1254,7 @@ class EchoForSequenceClassification(EchoPreTrainedModel):
 
     # Do NOT add GenerationMixin — this model must not generate text.
     main_input_name = "input_ids"
+    _supports_attention_backend = True
 
     def __init__(self, config: EchoConfig):
         super().__init__(config)
