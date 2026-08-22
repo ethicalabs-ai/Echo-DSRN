@@ -2,6 +2,11 @@
 # Dockerfile.serve-embed
 # Echo-DSRN sentence-embedding server (FastAPI + sentence-transformers, ROCm)
 #
+# Builds on the same vLLM ROCm base as the serving stack: it already ships
+# the ROCm userspace libraries, the video/render groups, and torch — so the
+# image is small on top of the shared base and stays consistent with the
+# hybrid/intent services (same ROCm runtime, same torch).
+#
 # Build:
 #   docker build -f Dockerfile.serve-embed -t echo-embed:rocm .
 #
@@ -12,18 +17,16 @@
 #     echo-embed:rocm
 # ─────────────────────────────────────────────────────────────────────────────
 
-FROM python:3.12-slim
+ARG VLLM_ROCM_IMAGE=vllm/vllm-openai-rocm:v0.27.1
+FROM ${VLLM_ROCM_IMAGE}
 
-# PyTorch ROCm build (self-contained HIP userspace; host provides /dev/kfd)
-RUN pip install --no-cache-dir \
-        torch --index-url https://download.pytorch.org/whl/rocm7.2 && \
-    pip install --no-cache-dir \
-        sentence-transformers \
-        fastapi \
-        "uvicorn[standard]"
+RUN pip install --no-cache-dir sentence-transformers
 
 WORKDIR /app
 COPY serve_embed.py /app/serve_embed.py
 
+# The vLLM base image ships `vllm` as its ENTRYPOINT — clear it so uvicorn
+# runs directly.
+ENTRYPOINT []
 EXPOSE 8003
 CMD ["uvicorn", "serve_embed:app", "--host", "0.0.0.0", "--port", "8003"]
