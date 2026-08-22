@@ -108,7 +108,7 @@ The full serving stack runs from `docker-compose.yml` (vLLM ROCm base image):
 | Port | Service | Default model | API |
 |---|---|---|---|
 | 8001 | chat / tool-calling | `mrs83/Kurtis-EON1-Hybrid-2B-v0.1.2` | `/v1/chat/completions` |
-| 8002 | intent classification | `ethicalabs/Echo-DSRN-v0.1.3-Intent-CLF` | `/classify` |
+| 8002 | intent classification | `ethicalabs/Echo-DSRN-v0.1.4-Embed-Intent-CLF` | `/classify` |
 | 8003 | sentence embeddings | `ethicalabs/Echo-DSRN-v0.1.3-Embed-Exp` | `/v1/embeddings` |
 
 ```bash

@@ -127,7 +127,7 @@ services:
       - ROCR_VISIBLE_DEVICES=${INTENT_GPU:-0}
     command:
       - --model
-      - ${INTENT_MODEL:-ethicalabs/Echo-DSRN-v0.1.3-Intent-CLF}
+      - ${INTENT_MODEL:-ethicalabs/Echo-DSRN-v0.1.4-Embed-Intent-CLF}
       - --served-model-name
       - echo-intent
       - --runner
