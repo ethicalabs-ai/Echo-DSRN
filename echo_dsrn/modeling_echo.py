@@ -563,7 +563,17 @@ class SlidingWindowAttention(nn.Module):
             # Replace -inf with 0 for the permitted window (float mask expected by sdpa)
             mask = torch.where(mask == float("-inf"), mask, torch.zeros_like(mask))
 
-            y = self._attn_call(attn_fn, q, k, v, mask.unsqueeze(0).unsqueeze(0), is_causal=False)
+            # Block attention to padding tokens.  The input attention_mask is
+            # only present on the plain transformers/ST path (padded batches);
+            # vLLM's pooling runner never passes one (its flattened batches
+            # are unpadded), so this is a no-op there.
+            mask4 = mask.unsqueeze(0).unsqueeze(0)  # (1, 1, T, kv)
+            input_mask = kwargs.get("attention_mask")
+            if input_mask is not None and self.attention_masking == "non_causal_window":
+                key_blocked = input_mask.bool().unsqueeze(1).unsqueeze(1)  # (B, 1, 1, T)
+                mask4 = mask4.masked_fill(~key_blocked, float("-inf"))
+
+            y = self._attn_call(attn_fn, q, k, v, mask4, is_causal=False)
         else:
             # Decoding: Recurrent step, attend only to the last window_size tokens
             y = self._attn_call(attn_fn, q, k_attn, v_attn, None, is_causal=False)
@@ -1380,6 +1390,7 @@ class EchoModelForPooling(EchoModel):
             past_key_values=past_key_values,
             inputs_embeds=inputs_embeds,
             position_ids=position_ids,
+            attention_mask=attention_mask,
             output_dsrn_telemetry=output_dsrn_telemetry,
             output_attentions=output_attentions,
             output_hidden_states=output_hidden_states,

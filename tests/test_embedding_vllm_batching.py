@@ -13,7 +13,10 @@ from echo_embedding import EchoModelForSentenceEmbedding
 
 @pytest.fixture
 def tiny_mean_c_all_embedding():
-    """A tiny mean_c_all embedding model for vLLM flattened-batch tests."""
+    """A tiny mean_c_all embedding model for vLLM flattened-batch tests.
+
+    Mirrors the real embed models: non-causal window attention.
+    """
     config = EchoConfig(
         vocab_size=1000,
         hidden_size=64,
@@ -23,6 +26,7 @@ def tiny_mean_c_all_embedding():
         max_position_embeddings=128,
         window_size=32,
         pooling_mode="mean_c_all",
+        attention_masking="non_causal_window",
     )
     model = EchoModelForSentenceEmbedding(config)
     model.eval()
@@ -102,3 +106,29 @@ def test_real_batch_with_mask_unchanged(tiny_mean_c_all_embedding):
     expected_dim = model.config.hidden_size * model.config.num_heads
     assert out.last_hidden_state.shape == (2, 5, expected_dim)
     assert not torch.isnan(out.last_hidden_state).any()
+
+
+def test_padded_batch_matches_singles(tiny_mean_c_all_embedding):
+    """Padding must not leak into the non-causal attention: a padded batch
+    produces the same per-sequence vectors as single requests."""
+    model = tiny_mean_c_all_embedding
+    torch.manual_seed(3)
+    short = torch.randint(0, 1000, (3,)).tolist()
+    long = torch.randint(0, 1000, (7,)).tolist()
+
+    single = _single_pooled(model, short)
+
+    padded = short + [0] * (len(long) - len(short))
+    ids = torch.tensor([padded, long])
+    mask = torch.tensor(
+        [
+            [1] * len(short) + [0] * (len(long) - len(short)),
+            [1] * len(long),
+        ]
+    )
+    with torch.no_grad():
+        out = model(input_ids=ids, attention_mask=mask)
+    got = out.last_hidden_state[0, 0]
+    assert torch.allclose(
+        got, single, atol=1e-5
+    ), "padded-batch embedding diverges from the single-request embedding"

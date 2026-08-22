@@ -118,6 +118,7 @@ class EchoModelForSentenceEmbedding(EchoPreTrainedModel):
             past_key_values=past_key_values,
             inputs_embeds=inputs_embeds,
             position_ids=position_ids,
+            attention_mask=attention_mask,
             output_attentions=output_attentions,
             output_hidden_states=output_hidden_states,
             return_dict=True,
