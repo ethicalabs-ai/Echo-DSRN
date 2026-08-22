@@ -32,10 +32,11 @@ All notable changes to Echo-DSRN-HF are documented here.
 - **Padding polluted the non-causal attention on the plain/ST path.** The
   bidirectional (`non_causal_window`) attention now blocks pad key-positions
   from the input `attention_mask` (a no-op under vLLM, which never passes
-  one), the embedding adapters forward `attention_mask` into the base model,
-  and the embed-family tokenizers right-pad (`padding_side: right`) so the
-  recurrence no longer processes pad tokens before the text. Padded ST
-  batches now match single requests exactly.
+  one) and the embedding adapters forward `attention_mask` into the base
+  model. The embed-family tokenizers stay **left-padded** to reproduce the
+  published MTEB benchmarks (card parity); a right-padded training version is
+  planned, which keeps padded batches consistent with single-request
+  embeddings.
 - **DSRN attention adapted to vLLM 0.27 module-first dispatch** (`_attn_call`),
   and the default hybrid service pinned to GPU 0.
 
