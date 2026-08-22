@@ -16,10 +16,26 @@ Endpoints
 """
 
 import os
+import sys
 
-from fastapi import FastAPI
-from pydantic import BaseModel
-from sentence_transformers import SentenceTransformer
+
+# Block vllm from being imported: this image shares the vLLM ROCm base, and
+# if vllm is importable the model's attention dispatch resolves vLLM's
+# module-first attention functions, which the HF-hosted modules (predating
+# the _attn_call fix) cannot call. This service only encodes via
+# sentence-transformers on plain torch, so vllm must never resolve.
+class _BlockVllm:
+    def find_spec(self, name, path=None, target=None):
+        if name.split(".")[0] == "vllm":
+            raise ImportError("vllm blocked: echo-embed uses plain torch")
+        return None
+
+
+sys.meta_path.insert(0, _BlockVllm())
+
+from fastapi import FastAPI  # noqa: E402
+from pydantic import BaseModel  # noqa: E402
+from sentence_transformers import SentenceTransformer  # noqa: E402
 
 MODEL_ID = os.environ.get("EMBED_MODEL", "ethicalabs/Echo-DSRN-v0.1.3-Embed-Exp")
 BATCH_SIZE = int(os.environ.get("EMBED_BATCH_SIZE", "32"))

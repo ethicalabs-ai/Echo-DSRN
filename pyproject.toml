@@ -20,13 +20,13 @@ dependencies = [
 [project.optional-dependencies]
 # CPU-only build — used in CI (uv sync --extra cpu)
 cpu = [
-    "torch>=2.10.0",
+    "torch>=2.13.0",
     "torchvision>=0.25.0",
     "torchaudio>=2.10.0",
 ]
 # ROCm build — used locally (uv sync --extra rocm)
 rocm = [
-    "torch>=2.10.0",
+    "torch>=2.13.0",
     "torchvision>=0.25.0",
     "torchaudio>=2.10.0",
     "bitsandbytes>=0.46.1",
