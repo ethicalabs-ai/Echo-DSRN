@@ -108,7 +108,7 @@ The full serving stack runs from `docker-compose.yml` (vLLM ROCm base image):
 | Port | Service | Default model | API |
 |---|---|---|---|
 | 8001 | chat / tool-calling | `mrs83/Kurtis-EON1-Hybrid-2B-v0.1.2` | `/v1/chat/completions` |
-| 8002 | intent classification | `ethicalabs/Echo-DSRN-v0.1.4-Embed-Intent-CLF` | `/classify` |
+| 8002 | intent classification | `ethicalabs/Echo-DSRN-v0.1.3-Intent-CLF` | `/classify` |
 | 8003 | sentence embeddings | `ethicalabs/Echo-DSRN-v0.1.3-Embed-Exp` | `/v1/embeddings` |
 
 ```bash
@@ -120,9 +120,11 @@ curl http://localhost:8001/v1/chat/completions \
 
 Model choices are overridable via environment variables (`HYBRID_MODEL`,
 `INTENT_MODEL`, `EMBED_MODEL`) or the repo-local `.env` file (gitignored).
-The classifier and chat services run on vLLM's pooling/generation runners;
-the embedding service uses sentence-transformers on the same ROCm base
-(Echo embedding checkpoints are sentence-transformers-format repos).
+All three services run on vLLM (generation runner for chat, pooling runner
+for classification and embeddings). The Echo embedding checkpoints are
+sentence-transformers-format repos; vLLM serves them through the pooling
+runner (`--convert embed`) with the same `trust_remote_code` modules —
+embeddings match the SentenceTransformer path to ~0.997 cosine.
 
 ## Surprise-Gate Temperature Modulation (`α`)
 
