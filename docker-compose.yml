@@ -81,7 +81,7 @@ services:
     environment:
       - HUGGING_FACE_HUB_TOKEN=${HF_TOKEN:-}
       - HF_HUB_ENABLE_HF_TRANSFER=1
-      - ROCR_VISIBLE_DEVICES=${HYBRID_GPU:-1}
+      - ROCR_VISIBLE_DEVICES=${HYBRID_GPU:-0}
     command:
       - --model
       - ${HYBRID_MODEL:-mrs83/Kurtis-EON1-Hybrid-0.7B-v0.1.1}
