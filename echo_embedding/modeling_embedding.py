@@ -9,10 +9,20 @@ try:
     from .configuration_echo import EchoConfig
 
     # pyrefly: ignore [missing-import]
-    from .modeling_echo import EchoModel, EchoPreTrainedModel
+    from .modeling_echo import (
+        EchoModel,
+        EchoPreTrainedModel,
+        _flattened_segment_mask,
+        _pool_hidden_states,
+    )
 except ImportError:
     from echo_dsrn.configuration_echo import EchoConfig
-    from echo_dsrn.modeling_echo import EchoModel, EchoPreTrainedModel
+    from echo_dsrn.modeling_echo import (
+        EchoModel,
+        EchoPreTrainedModel,
+        _flattened_segment_mask,
+        _pool_hidden_states,
+    )
 
 
 class EchoModelForSentenceEmbedding(EchoPreTrainedModel):
@@ -84,6 +94,24 @@ class EchoModelForSentenceEmbedding(EchoPreTrainedModel):
             explicit if explicit is not None else (pooling_mode in ["mean_c_all", "hybrid"])
         )
 
+        # vLLM's Transformers backend runs every sequence of a step as one
+        # flattened [1, N] forward (no attention_mask, position_ids restarting
+        # per sequence).  The DSRN recurrence cannot reset mid-forward, so
+        # each segment runs as its own forward with fresh state.
+        new_seq = _flattened_segment_mask(position_ids, input_ids, attention_mask)
+        if new_seq is not None:
+            return self._forward_flattened_segments(
+                input_ids,
+                position_ids,
+                new_seq,
+                return_dict,
+                past_key_values=past_key_values,
+                inputs_embeds=inputs_embeds,
+                output_attentions=output_attentions,
+                output_hidden_states=output_hidden_states,
+                **kwargs,
+            )
+
         # 1. Base model forward pass
         outputs = self.model(
             input_ids=input_ids,
@@ -105,50 +133,8 @@ class EchoModelForSentenceEmbedding(EchoPreTrainedModel):
         else:
             seq_len = 1
 
-        def mean_pooling(token_embeddings, mask):
-            input_mask_expanded = mask.unsqueeze(-1).expand(token_embeddings.size()).float()
-            sum_embeddings = torch.sum(token_embeddings * input_mask_expanded, 1)
-            sum_mask = input_mask_expanded.sum(1)
-            sum_mask = torch.clamp(sum_mask, min=1e-9)
-            return sum_embeddings / sum_mask
-
-        # 2. Extract and pool representations according to pooling_mode
-        if pooling_mode == "mean_c_all":
-            # Extract full sequence of recurrent slow states c_all from last layer
-            c_all = outputs.all_c_all[-1]  # shape: (Batch, Seq_Len, State_Dim)
-            if attention_mask is not None:
-                pooled = mean_pooling(c_all, attention_mask)
-            else:
-                pooled = c_all.mean(dim=1)
-        elif pooling_mode == "mean_x_out":
-            # Mean pool the final hidden state
-            last_hidden_state = outputs.last_hidden_state  # shape: (Batch, Seq_Len, hidden_size)
-            if attention_mask is not None:
-                pooled = mean_pooling(last_hidden_state, attention_mask)
-            else:
-                pooled = last_hidden_state.mean(dim=1)
-        elif pooling_mode == "hybrid":
-            # Concatenate pooled fast states (h_all) and slow states (c_all) from last layer
-            h_all = outputs.all_h_all[-1]  # shape: (Batch, Seq_Len, hidden_size)
-            c_all = outputs.all_c_all[-1]  # shape: (Batch, Seq_Len, State_Dim)
-            if attention_mask is not None:
-                pooled_h = mean_pooling(h_all, attention_mask)
-                pooled_c = mean_pooling(c_all, attention_mask)
-            else:
-                pooled_h = h_all.mean(dim=1)
-                pooled_c = c_all.mean(dim=1)
-            pooled = torch.cat(
-                [pooled_h, pooled_c], dim=-1
-            )  # shape: (Batch, hidden_size + State_Dim)
-        else:  # "c_T" (default baseline behavior)
-            past = outputs.past_key_values
-            if hasattr(past, "__getitem__"):
-                last_layer_state = past[-1]
-            elif hasattr(past, "states"):  # EchoCache support
-                last_layer_state = past.states[-1]
-            else:
-                raise ValueError("Could not extract recurrent state from model cache.")
-            pooled = last_layer_state[1]  # shape: (Batch, State_Dim)
+        # 2. Pool representations according to pooling_mode (shared helper)
+        pooled = _pool_hidden_states(outputs, pooling_mode, attention_mask)
 
         # 3. Apply optional projection
         if self.projection is not None:
@@ -173,4 +159,73 @@ class EchoModelForSentenceEmbedding(EchoPreTrainedModel):
             result.all_c_all = outputs.all_c_all
         if hasattr(outputs, "all_h_all"):
             result.all_h_all = outputs.all_h_all
+        return result
+
+    def _forward_flattened_segments(
+        self,
+        input_ids,
+        position_ids,
+        new_seq,
+        return_dict,
+        **kwargs,
+    ) -> Union[Tuple, BaseModelOutputWithPast]:
+        """Run each flattened-batch segment as its own forward.
+
+        vLLM concatenates all sequences scheduled in a step into one
+        ``[1, N]`` forward with ``position_ids`` restarting at each sequence
+        start.  The DSRN recurrence carries state across the whole forward
+        (its boundary handling freezes, it does not reset), so the segments
+        cannot share one scan.  Running each segment independently reproduces
+        the single-request semantics exactly; the pooled vectors are then
+        stitched back into the ``[1, N]`` layout vLLM expects.
+        """
+        seg_ids = torch.cumsum(new_seq.long(), dim=1) - 1  # (1, N)
+        num_segs = int(seg_ids.max().item()) + 1
+        seg_outputs = []
+        for i in range(num_segs):
+            sel = seg_ids[0] == i
+            seg_outputs.append(
+                self.forward(
+                    input_ids=input_ids[:, sel],
+                    position_ids=position_ids[:, sel],
+                    **kwargs,
+                )
+            )
+
+        if not return_dict:
+            return (
+                torch.cat([o[0] for o in seg_outputs], dim=1),
+                seg_outputs[-1][1],
+            )
+
+        result = BaseModelOutputWithPast(
+            last_hidden_state=torch.cat([o.last_hidden_state for o in seg_outputs], dim=1),
+            past_key_values=seg_outputs[-1].past_key_values,
+            hidden_states=(
+                [
+                    torch.cat([o.hidden_states[layer_idx] for o in seg_outputs], dim=1)
+                    for layer_idx in range(len(seg_outputs[0].hidden_states))
+                ]
+                if seg_outputs[0].hidden_states is not None
+                else None
+            ),
+            attentions=(
+                [
+                    torch.cat([o.attentions[layer_idx] for o in seg_outputs], dim=1)
+                    for layer_idx in range(len(seg_outputs[0].attentions))
+                ]
+                if seg_outputs[0].attentions is not None
+                else None
+            ),
+        )
+        if hasattr(seg_outputs[0], "all_c_all") and seg_outputs[0].all_c_all is not None:
+            result.all_c_all = [
+                torch.cat([o.all_c_all[layer_idx] for o in seg_outputs], dim=1)
+                for layer_idx in range(len(seg_outputs[0].all_c_all))
+            ]
+        if hasattr(seg_outputs[0], "all_h_all") and seg_outputs[0].all_h_all is not None:
+            result.all_h_all = [
+                torch.cat([o.all_h_all[layer_idx] for o in seg_outputs], dim=1)
+                for layer_idx in range(len(seg_outputs[0].all_h_all))
+            ]
         return result
