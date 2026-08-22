@@ -461,11 +461,6 @@ class SlidingWindowAttention(nn.Module):
         self.head_dim = self.hidden_size // self.num_heads
         self.window_size = getattr(config, "window_size", 128)
         self.attention_masking = getattr(config, "attention_masking", "causal")
-        # vLLM's Transformers backend inspects `module.is_causal` to pick the
-        # decoder (causal) vs encoder (bidirectional) attention backend —
-        # mirror the masking mode so non_causal_window models keep their
-        # bidirectional semantics under vLLM.
-        self.is_causal = self.attention_masking != "non_causal_window"
 
         self.qkv_proj = nn.Linear(self.hidden_size, 3 * self.hidden_size, bias=False)
         self.out_proj = nn.Linear(self.hidden_size, self.hidden_size, bias=False)
