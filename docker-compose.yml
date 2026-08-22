@@ -81,7 +81,7 @@ services:
     environment:
       - HUGGING_FACE_HUB_TOKEN=${HF_TOKEN:-}
       - HF_HUB_ENABLE_HF_TRANSFER=1
-      - ROCR_VISIBLE_DEVICES=${HYBRID_GPU:-0}
+      - ROCR_VISIBLE_DEVICES=${HYBRID_GPU:-1}
     command:
       - --model
       - ${HYBRID_MODEL:-mrs83/Kurtis-EON1-Hybrid-0.7B-v0.1.1}
@@ -157,6 +157,37 @@ services:
       timeout: 10s
       retries: 5
       start_period: 60s
+
+  # ── Echo-Embed (sentence-transformers embedding server) ───────────────
+  echo-embed:
+    image: echo-embed:rocm
+    build:
+      context: .
+      dockerfile: Dockerfile.serve-embed
+    container_name: echo-embed
+    ports:
+      - "8003:8003"
+    devices:
+      - /dev/kfd
+      - /dev/dri
+    group_add:
+      - video
+      - render
+    ipc: host
+    security_opt:
+      - seccomp:unconfined
+    volumes:
+      - hf-cache:/root/.cache/huggingface
+    environment:
+      - EMBED_MODEL=${EMBED_MODEL:-ethicalabs/Echo-DSRN-v0.1.3-Embed-Exp}
+      - ROCR_VISIBLE_DEVICES=${EMBED_GPU:-1}
+    healthcheck:
+      test: [ "CMD", "curl", "-f", "http://localhost:8003/health" ]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 60s
+    restart: unless-stopped
 
 volumes:
   hf-cache:
