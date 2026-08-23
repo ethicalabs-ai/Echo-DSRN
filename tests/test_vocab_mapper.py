@@ -196,7 +196,7 @@ class TestBuildVocabIntersection:
         from transformers import AutoTokenizer
 
         draft_tok = AutoTokenizer.from_pretrained(
-            "models_v4/Echo-DSRN-114M-v0.1.4", trust_remote_code=True
+            "ethicalabs/Echo-DSRN-114M-v0.1.2", trust_remote_code=True
         )
         target_tok = AutoTokenizer.from_pretrained("Qwen/Qwen2.5-0.5B", trust_remote_code=True)
 
@@ -226,7 +226,7 @@ class TestBuildVocabIntersection:
         from transformers import AutoTokenizer
 
         draft_tok = AutoTokenizer.from_pretrained(
-            "models_v4/Echo-DSRN-114M-v0.1.4", trust_remote_code=True
+            "ethicalabs/Echo-DSRN-114M-v0.1.2", trust_remote_code=True
         )
         target_tok = AutoTokenizer.from_pretrained("Qwen/Qwen2.5-0.5B", trust_remote_code=True)
 

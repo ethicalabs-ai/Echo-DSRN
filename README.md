@@ -212,7 +212,7 @@ Benchmark with `scripts/benchmark_cross_speculative.py`:
 
 ```bash
 uv run --extra rocm python scripts/benchmark_cross_speculative.py \
-    --draft models_v4/Echo-DSRN-114M-v0.1.4 \
+    --draft ethicalabs/Echo-DSRN-114M-v0.1.2 \
     --target Qwen/Qwen3.8-27B
 ```
 
