@@ -6,6 +6,10 @@ All notable changes to Echo-DSRN-HF are documented here.
 
 ## [Unreleased]
 
+---
+
+## [0.1.11] — 2026-08-23
+
 ### Added
 
 - **Cross-vocabulary (TLI) speculative decoding.** `DSparkEchoScheduler` can
