@@ -64,6 +64,30 @@ class DSparkEchoConfig:
     vocab_mapper: Optional[VocabMapper] = None
 
 
+def _cache_is_truncatable(cache) -> bool:
+    """Whether ``cache`` can be safely truncated to a shorter prefix.
+
+    Plain attention layers store per-position (k, v) tensors and truncate
+    exactly.  Hybrid targets (transformers 5.x linear-attention layers, e.g.
+    gated delta net) additionally carry recurrent/convolutional state that
+    encodes history beyond the raw positions and cannot be rewound — for those
+    the scheduler falls back to a full re-prefix instead.
+    """
+    if cache is None:
+        return True
+    for layer in cache.layers if hasattr(cache, "layers") else cache:
+        if hasattr(layer, "conv_states") or hasattr(layer, "recurrent_states"):
+            return False
+        if hasattr(layer, "keys"):  # transformers >= 5.x DynamicLayer
+            continue
+        try:  # legacy (k, v) tuple
+            k, v = layer
+            _ = k, v
+        except (TypeError, ValueError):
+            return False
+    return True
+
+
 def _truncate_kv_cache(cache, length: int):
     """Truncate a target KV cache so it covers only the first ``length`` positions.
 
@@ -439,6 +463,12 @@ class DSparkEchoScheduler:
         ``past_key_values`` (draft state) and ``target_cache`` are rolled back /
         advanced to cover the new prefix minus its last token, ready for the
         next call.
+
+        Targets whose KV cache cannot be truncated (hybrid models with
+        linear-attention layers carrying recurrent/convolutional state, e.g.
+        gated delta net) return ``target_cache=None``: the next call re-prefixes
+        the full sequence instead of continuing from a cache.  This is always
+        lossless — only the target-side compute differs.
         """
         mapper = self.config.vocab_mapper
         if mapper is not None:
@@ -490,14 +520,18 @@ class DSparkEchoScheduler:
         new_draft_state = self.rollback(n_accepted)
 
         # Target cache for the next round (covers the new prefix minus its
-        # last token).
+        # last token).  Targets with non-truncatable caches (hybrid models with
+        # linear-attention / recurrent-state layers) skip truncation and
+        # rebuild entirely: target_cache stays None and the next verify()
+        # re-prefixes the full sequence — always lossless, just slower.
         target_cache = None
         if return_cache:
             new_prefix_len = input_ids.shape[1] + padded.shape[1]
             partial = bool((n_accepted < draft_ids.shape[1]).any())
-            if not partial:
+            truncatable = _cache_is_truncatable(details["cache"])
+            if not partial and truncatable:
                 target_cache = _truncate_kv_cache(details["cache"], new_prefix_len - 1)
-            elif accepted.shape[0] == 1:
+            elif partial and accepted.shape[0] == 1 and truncatable:
                 # Rebuild cheaply: re-run the target over just the new tokens.
                 if target_past_key_values is not None:
                     out = target_model(

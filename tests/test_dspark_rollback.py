@@ -18,7 +18,11 @@ import torch
 import torch.nn as nn
 
 from echo_dsrn.configuration_echo import EchoConfig
-from echo_dsrn.dspark_scheduler import DSparkEchoConfig, DSparkEchoScheduler
+from echo_dsrn.dspark_scheduler import (
+    DSparkEchoConfig,
+    DSparkEchoScheduler,
+    _cache_is_truncatable,
+)
 from echo_dsrn.modeling_echo import EchoForCausalLM
 from echo_dsrn.speculative.vocab_mapper import VocabMapper
 
@@ -93,6 +97,29 @@ class GreedyMockTarget(nn.Module):
             cache = DynamicCache()
             cache.update(torch.randn(B, 2, offset + T, 8), torch.randn(B, 2, offset + T, 8), 0)
             out.past_key_values = cache
+        return out
+
+
+class FakeLinearStateLayer:
+    """Mimics a transformers 5.x linear-attention cache layer.
+
+    Hybrid targets (e.g. gated delta net) carry recurrent/convolutional state
+    that cannot be rewound to a shorter prefix, unlike plain (k, v) layers.
+    """
+
+    def __init__(self):
+        self.conv_states = [torch.zeros(1, 1, 1, 4)]
+        self.recurrent_states = [torch.zeros(1, 1, 4)]
+
+
+class HybridCacheMockTarget(GreedyMockTarget):
+    """GreedyMockTarget whose cache also holds a non-truncatable layer."""
+
+    def forward(self, input_ids, past_key_values=None, **kwargs):
+        out = super().forward(input_ids, past_key_values=past_key_values, **kwargs)
+        if self.return_cache:
+            cache = out.past_key_values
+            cache.layers.append(FakeLinearStateLayer())
         return out
 
 
@@ -319,6 +346,67 @@ class TestStepCacheContract:
         for token in r["accepted_tokens"][0].tolist():
             assert 0 <= token < target.target_vocab_size
         assert r["n_accepted"][0].item() <= scheduler.config.max_draft_len
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# 3b. Cache truncatability — hybrid targets fall back to a full re-prefix
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+class TestCacheTruncatability:
+    def test_none_is_truncatable(self):
+        assert _cache_is_truncatable(None) is True
+
+    def test_legacy_kv_tuples_are_truncatable(self):
+        k, v = torch.randn(1, 2, 3, 4), torch.randn(1, 2, 3, 4)
+        assert _cache_is_truncatable([(k, v), (k, v)]) is True
+
+    def test_linear_state_layer_is_not_truncatable(self):
+        k, v = torch.randn(1, 2, 3, 4), torch.randn(1, 2, 3, 4)
+        cache = [(k, v), FakeLinearStateLayer()]
+        assert _cache_is_truncatable(cache) is False
+
+    def test_unknown_layer_is_not_truncatable(self):
+        assert _cache_is_truncatable([object()]) is False
+
+    def test_dynamic_cache_with_linear_layer_is_not_truncatable(self):
+        from transformers import DynamicCache
+
+        cache = DynamicCache()
+        cache.update(torch.randn(1, 2, 3, 4), torch.randn(1, 2, 3, 4), 0)
+        cache.layers.append(FakeLinearStateLayer())
+        assert _cache_is_truncatable(cache) is False
+
+    def test_plain_dynamic_cache_is_truncatable(self):
+        from transformers import DynamicCache
+
+        cache = DynamicCache()
+        cache.update(torch.randn(1, 2, 3, 4), torch.randn(1, 2, 3, 4), 0)
+        assert _cache_is_truncatable(cache) is True
+
+
+class TestHybridTargetFallback:
+    def test_hybrid_target_cache_stays_none(self):
+        draft = make_draft()
+        scheduler = make_scheduler(draft, vocab_mapper=make_mapper())
+        target = HybridCacheMockTarget(return_cache=True)
+        prompt = torch.tensor([[1, 2, 3]])
+        r = scheduler.step(prompt, target, return_cache=True)
+        assert r["target_cache"] is None
+
+    def test_hybrid_target_spec_stream_equals_greedy_reference(self):
+        """Re-prefix mode must stay lossless end to end."""
+        draft = make_draft()
+        scheduler = make_scheduler(draft, vocab_mapper=make_mapper(), max_draft_len=4)
+        target = HybridCacheMockTarget()
+        prompt = torch.tensor([[1, 2, 3]])
+        max_new = 24
+
+        generated, _, _ = run_spec_loop(scheduler, target, prompt, max_new, return_cache=True)
+
+        reference = [target.greedy(prompt.shape[1] - 1 + i) for i in range(max_new)]
+        assert len(generated) == max_new, "spec loop stalled"
+        assert generated == reference
 
 
 # ─────────────────────────────────────────────────────────────────────────────
