@@ -65,12 +65,24 @@ class VocabMapper:
         draft_vocab_size: int,
         target_vocab_size: int,
         draft_unk_id: Optional[int] = None,
+        draft_exact_keys: Optional[Mapping[int, int]] = None,
+        target_exact_keys: Optional[Mapping[int, int]] = None,
     ):
         self.draft_to_target: Dict[int, int] = dict(draft_to_target)
         self.target_to_draft: Dict[int, int] = {v: k for k, v in self.draft_to_target.items()}
         self.draft_vocab_size = int(draft_vocab_size)
         self.target_vocab_size = int(target_vocab_size)
         self.draft_unk_id = draft_unk_id
+        # Exact-string verification keys (see matches_draft_to_target).  Equal
+        # keys mean the two token ids decode to the *same* token string, which
+        # is what a lossless verification must compare — not the fuzzy
+        # representative ids used for context translation.
+        self.draft_exact_keys: Optional[Dict[int, int]] = (
+            dict(draft_exact_keys) if draft_exact_keys is not None else None
+        )
+        self.target_exact_keys: Optional[Dict[int, int]] = (
+            dict(target_exact_keys) if target_exact_keys is not None else None
+        )
 
         if self.draft_unk_id is not None and not 0 <= self.draft_unk_id < self.draft_vocab_size:
             raise ValueError(
@@ -82,6 +94,8 @@ class VocabMapper:
         self._draft_mask: Optional[torch.Tensor] = None
         self._draft_to_target_tensor: Optional[torch.Tensor] = None
         self._target_to_draft_tensor: Optional[torch.Tensor] = None
+        self._draft_key_tensor: Optional[torch.Tensor] = None
+        self._target_key_tensor: Optional[torch.Tensor] = None
 
     # ── Introspection ─────────────────────────────────────────────────────
 
@@ -141,6 +155,27 @@ class VocabMapper:
             )
         return translated
 
+    # ── Exact-string verification ─────────────────────────────────────────
+
+    def matches_draft_to_target(
+        self, draft_ids: torch.Tensor, target_ids: torch.Tensor
+    ) -> torch.Tensor:
+        """Lossless acceptance check: does the target's greedy token decode to
+        the exact same string as the draft proposal?
+
+        The fuzzy intersection (normalized matching) is only used for the
+        proposal mask and context translation.  Acceptance must compare the
+        *exact* token strings — otherwise case/NFC collisions (e.g. ``the``
+        vs ``The``) translate correct proposals to a wrong representative id
+        and reject them.  Falls back to translated-id equality when exact
+        keys were not provided.
+        """
+        if self.draft_exact_keys is None or self.target_exact_keys is None:
+            return self.translate_draft_to_target(draft_ids) == target_ids
+        draft_keys = self._get_draft_key_tensor(draft_ids.device)[draft_ids]
+        target_keys = self._get_target_key_tensor(target_ids.device)[target_ids]
+        return (draft_keys >= 0) & (draft_keys == target_keys)
+
     # ── Lazy tensor helpers ───────────────────────────────────────────────
 
     def _get_draft_mask(self, device) -> torch.Tensor:
@@ -166,6 +201,22 @@ class VocabMapper:
             self._target_to_draft_tensor = lookup.to(device)
         return self._target_to_draft_tensor
 
+    def _get_draft_key_tensor(self, device) -> torch.Tensor:
+        if self._draft_key_tensor is None or self._draft_key_tensor.device != device:
+            lookup = torch.full((self.draft_vocab_size,), -1, dtype=torch.long)
+            for draft_id, key in self.draft_exact_keys.items():
+                lookup[draft_id] = key
+            self._draft_key_tensor = lookup.to(device)
+        return self._draft_key_tensor
+
+    def _get_target_key_tensor(self, device) -> torch.Tensor:
+        if self._target_key_tensor is None or self._target_key_tensor.device != device:
+            lookup = torch.full((self.target_vocab_size,), -1, dtype=torch.long)
+            for target_id, key in self.target_exact_keys.items():
+                lookup[target_id] = key
+            self._target_key_tensor = lookup.to(device)
+        return self._target_key_tensor
+
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Builder
@@ -186,6 +237,28 @@ def _build_text_index(tokenizer, vocab_size: int) -> Dict[str, int]:
     return index
 
 
+def _build_exact_keys(tokenizer, vocab_size: int) -> Dict[int, int]:
+    """Map token ids to an exact-string key (space markers normalized only).
+
+    Equal keys mean the two tokens decode to the *same* string — no case or
+    Unicode folding, because folding would make distinct tokens (e.g. ``the``
+    vs ``The``) collide and corrupt the lossless verification.
+    """
+    tokens = tokenizer.convert_ids_to_tokens(list(range(vocab_size)))
+    key_by_string: Dict[str, int] = {}
+    keys: Dict[int, int] = {}
+    for token_id, text in enumerate(tokens):
+        if text is None or is_special_token(text):
+            continue
+        for marker in _SPACE_MARKERS:
+            text = text.replace(marker, " ")
+        if not text:
+            continue
+        key = key_by_string.setdefault(text, len(key_by_string))
+        keys[token_id] = key
+    return keys
+
+
 def build_vocab_intersection(
     draft_tokenizer,
     target_tokenizer,
@@ -195,11 +268,15 @@ def build_vocab_intersection(
 ) -> VocabMapper:
     """Build the TLI mapping from two HuggingFace tokenizers.
 
-    String-level matching on normalized token pieces (see
-    :func:`normalize_token_text`).  Special tokens and tokens that normalize to
-    an empty string are excluded.  ``draft_vocab_size`` defaults to the draft
-    tokenizer's ``vocab_size`` — pass the model's ``config.vocab_size`` when the
-    embedding is larger than the tokenizer.
+    The intersection uses string-level matching on normalized token pieces (see
+    :func:`normalize_token_text`); it drives the proposal mask and the draft
+    context translation.  Verification additionally gets exact-string keys
+    (:meth:`VocabMapper.matches_draft_to_target`) so acceptance compares the
+    true token strings, not the fuzzy representatives.  Special tokens and
+    tokens that normalize to an empty string are excluded.
+    ``draft_vocab_size`` defaults to the draft tokenizer's ``vocab_size`` —
+    pass the model's ``config.vocab_size`` when the embedding is larger than
+    the tokenizer.
     """
     draft_vocab_size = draft_vocab_size or draft_tokenizer.vocab_size
     target_vocab_size = target_vocab_size or target_tokenizer.vocab_size
@@ -221,4 +298,6 @@ def build_vocab_intersection(
         draft_vocab_size=draft_vocab_size,
         target_vocab_size=target_vocab_size,
         draft_unk_id=unk_token_id,
+        draft_exact_keys=_build_exact_keys(draft_tokenizer, draft_tokenizer.vocab_size),
+        target_exact_keys=_build_exact_keys(target_tokenizer, target_tokenizer.vocab_size),
     )

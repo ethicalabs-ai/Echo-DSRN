@@ -25,6 +25,14 @@ attention's masked vs unmasked path), which further lowers acceptance versus
 a full re-prefix each round.  Losslessness is unaffected: the generated
 stream always matches the target's own greedy decoding.
 
+Same-vocabulary targets (e.g. the Phi-3.5/Phi-4 family, which shares the
+draft's tokenizer) should NOT be routed through the TLI mapper: the
+piece-intersection mask forces the draft off its best token ~30% of the time
+and collapses acceptance ~9x.  Use the original same-vocab scheduler path
+(``scratch/benchmark_dspark_scheduler.py``) for those — it is the validated
+~64% token-efficiency setup.  This benchmark exists for genuinely
+cross-vocabulary targets.
+
 Usage
 ─────
     uv run --extra rocm python scripts/benchmark_cross_speculative.py \

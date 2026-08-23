@@ -185,7 +185,40 @@ class TestTargetToDraftTranslation:
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# 6. Real-tokenizer build
+# 6. Exact-string verification keys
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+class TestExactStringVerification:
+    def test_matches_requires_exact_string(self):
+        """Case-colliding tokens ('The' vs 'the') must not verify against
+        each other, even when the fuzzy intersection conflates them."""
+        # draft 0 = "The", draft 1 = "the"; target 20 = "The", target 21 = "the"
+        # The fuzzy map conflates them into representatives, but the exact
+        # keys must keep them distinct.
+        mapper = VocabMapper(
+            {0: 20, 1: 20},  # both fuzzy-map to target 20 ("The")
+            draft_vocab_size=4,
+            target_vocab_size=24,
+            draft_unk_id=0,
+            draft_exact_keys={0: 0, 1: 1},
+            target_exact_keys={20: 0, 21: 1},
+        )
+        assert bool(mapper.matches_draft_to_target(torch.tensor([0]), torch.tensor([20])))
+        assert bool(mapper.matches_draft_to_target(torch.tensor([1]), torch.tensor([21])))
+        assert not bool(mapper.matches_draft_to_target(torch.tensor([0]), torch.tensor([21])))
+        assert not bool(mapper.matches_draft_to_target(torch.tensor([1]), torch.tensor([20])))
+
+    def test_matches_falls_back_to_translated_ids_without_keys(self):
+        mapper = make_mapper()  # no exact keys
+        accepted = mapper.matches_draft_to_target(torch.tensor([3]), torch.tensor([23]))
+        assert bool(accepted)
+        rejected = mapper.matches_draft_to_target(torch.tensor([3]), torch.tensor([22]))
+        assert not bool(rejected)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# 7. Real-tokenizer build
 # ─────────────────────────────────────────────────────────────────────────────
 
 

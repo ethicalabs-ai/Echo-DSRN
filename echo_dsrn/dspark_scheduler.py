@@ -387,7 +387,12 @@ class DSparkEchoScheduler:
             target_preds = logits[:, prefix_len - 1 : prefix_len - 1 + draft_len, :]
 
         target_tokens = target_preds.argmax(dim=-1)
-        accepted = target_drafts == target_tokens
+        if mapper is not None:
+            # Exact-string comparison (fuzzy representative ids would reject
+            # correct proposals that collide under normalization).
+            accepted = mapper.matches_draft_to_target(draft_ids, target_tokens)
+        else:
+            accepted = target_drafts == target_tokens
 
         if cutoff_lens is not None and self.config.enable_confidence:
             positions = torch.arange(draft_len, device=draft_ids.device).unsqueeze(0)
