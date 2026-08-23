@@ -363,9 +363,8 @@ class DSparkEchoScheduler:
         greedy ids at each draft position, in the target vocabulary) and
         ``cache`` (the target KV cache from the verification forward).
 
-        When ``past_key_values`` is provided it must cover ``input_ids`` (the
-        full prefix); only the last prefix token plus the drafts are fed
-        forward.
+        When ``past_key_values`` is provided it must cover ``input_ids[:-1]``
+        (the last prefix token is fed together with the drafts).
         """
         mapper = self.config.vocab_mapper
         draft_len = draft_ids.shape[1]
@@ -425,8 +424,9 @@ class DSparkEchoScheduler:
         ``past_key_values`` is the draft state covering the draft-vocabulary
         translation of ``input_ids[:-1]`` (all but the last token); pass the
         ``past_key_values`` value returned by the previous ``step()``.
-        ``target_past_key_values`` is the target cache covering ``input_ids``;
-        pass the ``target_cache`` value returned by the previous call.
+        ``target_past_key_values`` is the target cache covering ``input_ids[:-1]``
+        (the last token is fed as part of the verification input); pass the
+        ``target_cache`` value returned by the previous call.
 
         The returned ``accepted_tokens`` include the target's own greedy token
         at the first rejected draft position (standard speculative-decoding
