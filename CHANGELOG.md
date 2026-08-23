@@ -20,9 +20,50 @@ All notable changes to Echo-DSRN-HF are documented here.
   targets.
 - **`scripts/benchmark_cross_speculative.py`.** CLI benchmark of tokens/sec
   and leading-run acceptance for Echo-DSRN → Qwen, including a cached-greedy
-  vanilla reference for speedup comparison.
+  vanilla reference for speedup comparison. New `--target-device-map auto`
+  (split large targets across GPUs via accelerate) and `--target-quant 4bit`
+  (bitsandbytes NF4) flags for targets that do not fit in VRAM unquantized.
+
+### Known limitations (cross-vocabulary TLI)
+
+- **Leading-run acceptance is the binding constraint, not raw agreement.**
+  Stateless per-position agreement measures 25–50% (Qwen2.5-0.5B 25%, Phi-4
+  50%), but loop leading-run acceptance is ~1.5% for every cross-vocabulary
+  target measured (Qwen2.5-0.5B, Phi-4 14B, Qwen3.8-27B). Token-level
+  speculation only pays off when the draft's per-position agreement is
+  high enough that *runs* survive; 25–50% raw converts to <2% leading.
+- **Speedup is < 1 on all measured targets** (0.13×–0.34×): cross-vocabulary
+  speculation is currently a net loss versus greedy decoding, including the
+  27B scenario (0.17×) that was hoped to flip the economics.
+- **Phi-4 does not share the draft tokenizer.** Despite the assumption in
+  early planning, `microsoft/Phi-4` uses a 100,352-vocab tokenizer (the
+  draft is 32,017); only `Phi-3.5-mini-instruct` / `Phi-3-mini-4k-instruct`
+  are genuinely same-vocabulary (verified by identical encoding). Phi-4 must
+  be treated as cross-vocabulary.
+- **Hybrid targets lose target-side cache reuse.** Targets with
+  linear-attention layers (Qwen3.8's gated delta net) cannot have their KV
+  cache truncated to a shorter prefix; the scheduler falls back to a full
+  re-prefix every round, which is lossless but adds per-round target cost.
 
 ### Fixed
+
+- **Cross-vocab exact-string verification keys were compared across
+  unrelated per-tokenizer numberings.** Exact-string keys were assigned by
+  first-appearance order within each tokenizer, so the same token string
+  (e.g. " th") received different key values in the draft and target tables.
+  `matches_draft_to_target()` therefore rejected nearly every proposal —
+  measured acceptance collapsed to 0% for all cross-vocabulary targets
+  (14,245 of 14,248 shared tokens mismatched) even where raw-ID agreement
+  was 50%. Keys are now assigned from a single shared string table spanning
+  both vocabularies. `mask_logits()` also raises a clear error when the
+  mapper was sized from the tokenizer rather than the LM head.
+- **Target cache truncation crashed on hybrid (linear-attention) targets.**
+  `_truncate_kv_cache()` unpacked every cache layer as `(k, v)`, which
+  fails on Qwen3.8's gated-delta-net layers (`LinearAttentionLayer`).
+  Non-truncatable caches (layers carrying conv/recurrent state) are now
+  detected via `_cache_is_truncatable()` and fall back to a full re-prefix
+  next round — always lossless, verified against the real 64-layer Qwen3.8
+  cache (48 linear + 16 full-attention layers).
 
 - **Cached continuation dropped the recurrent state for pure-DSRN models.**
   `EchoModel` treated any cache whose `get_seq_length() == 0` as empty, which
