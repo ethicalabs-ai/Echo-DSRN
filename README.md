@@ -183,6 +183,39 @@ At τ_load=0.05, Echo-DSRN-114M achieves 64% token efficiency when drafting agai
 Phi-3-mini-4k-instruct (3.8B target) — the confidence signal correctly identifies
 reliable draft positions.
 
+#### Cross-vocabulary decoding (TLI)
+
+The scheduler also drafts against targets with a *different* tokenizer (e.g. Qwen
+2.5/3.x). The `vocab_mapper` builds the string-normalized token-level
+intersection `I` between the two vocabularies, restricts the draft's logits to
+`I`, and translates ids at the verification boundary. `step()` maintains the
+draft and target KV caches across rounds and emits the target's own token at the
+first rejected position, so the generated stream is lossless (identical to the
+target's greedy decoding).
+
+```python
+from echo_dsrn.dspark_scheduler import DSparkEchoScheduler, DSparkEchoConfig
+from echo_dsrn.speculative.vocab_mapper import build_vocab_intersection
+
+mapper = build_vocab_intersection(draft_tokenizer, target_tokenizer,
+                                  draft_vocab_size=draft_model.config.vocab_size)
+scheduler = DSparkEchoScheduler(
+    draft_model,
+    DSparkEchoConfig(max_draft_len=8, tau_load=0.05, vocab_mapper=mapper),
+)
+
+# Stateful generation loop: pass back the returned caches each round.
+result = scheduler.step(target_ids, target_model, return_cache=True)
+```
+
+Benchmark with `scripts/benchmark_cross_speculative.py`:
+
+```bash
+uv run --extra rocm python scripts/benchmark_cross_speculative.py \
+    --draft models_v4/Echo-DSRN-114M-v0.1.4 \
+    --target Qwen/Qwen3.8-27B
+```
+
 ## Embedding Models
 
 Echo-DSRN can be converted to a dense sentence embedding model via

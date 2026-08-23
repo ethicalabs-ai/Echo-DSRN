@@ -4,6 +4,34 @@ All notable changes to Echo-DSRN-HF are documented here.
 
 ---
 
+## [Unreleased]
+
+### Added
+
+- **Cross-vocabulary (TLI) speculative decoding.** `DSparkEchoScheduler` can
+  now draft against a target model with a *different* tokenizer (e.g. Echo-DSRN
+  32k → Qwen 152k/248k). New module `echo_dsrn/speculative/vocab_mapper.py`
+  builds the string-normalized token-level intersection `I`, restricts draft
+  logits to `I`, and translates draft↔target ids. The scheduler records
+  per-step draft states and `rollback(n_accepted)` restores the exact cache at
+  the accepted prefix; `step()` maintains draft and target KV-cache invariants
+  for a lossless generation loop (the target's own token is emitted at the
+  first rejection). Losslessness verified end-to-end against real Qwen
+  targets.
+- **`scripts/benchmark_cross_speculative.py`.** CLI benchmark of tokens/sec
+  and leading-run acceptance for Echo-DSRN → Qwen, including a cached-greedy
+  vanilla reference for speedup comparison.
+
+### Fixed
+
+- **Cached continuation dropped the recurrent state for pure-DSRN models.**
+  `EchoModel` treated any cache whose `get_seq_length() == 0` as empty, which
+  discarded the `(h, c)` state of 2-tuple (attention-less) caches on every
+  cached forward. Non-empty `EchoCache` objects are now never treated as
+  empty.
+
+---
+
 ## [0.1.10] — 2026-08-22
 
 ### Added
