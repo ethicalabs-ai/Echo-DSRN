@@ -33,6 +33,14 @@ and collapses acceptance ~9x.  Use the original same-vocab scheduler path
 ~64% token-efficiency setup.  This benchmark exists for genuinely
 cross-vocabulary targets.
 
+Hybrid targets (e.g. Qwen3.8, whose cache holds gated-delta-net
+linear-attention layers with recurrent state) cannot have their target cache
+truncated to a shorter prefix.  The scheduler detects this and falls back to
+re-prefixing the full sequence every round — always lossless, but the
+target-side cache reuse that normally makes speculative decoding cheap is
+lost.  Expect lower speedups for hybrid targets than for plain-attention
+targets at the same size; the measured acceptance rate is unaffected.
+
 Usage
 ─────
     uv run --extra rocm python scripts/benchmark_cross_speculative.py \
@@ -54,7 +62,11 @@ import torch
 _project_root = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(_project_root))
 
-from transformers import AutoModelForCausalLM, AutoTokenizer  # noqa: E402
+from transformers import (  # noqa: E402
+    AutoModelForCausalLM,
+    AutoTokenizer,
+    BitsAndBytesConfig,
+)
 
 from echo_dsrn import EchoConfig, EchoForCausalLM  # noqa: E402
 from echo_dsrn.dspark_scheduler import (  # noqa: E402
@@ -89,6 +101,20 @@ def parse_args():
     p.add_argument("--seed", type=int, default=0)
     p.add_argument("--dtype", choices=["bf16", "fp32"], default="bf16")
     p.add_argument("--device", default="cuda" if torch.cuda.is_available() else "cpu")
+    p.add_argument(
+        "--target-device-map",
+        choices=["auto", "single"],
+        default="auto",
+        help="'auto' splits large targets across GPUs (accelerate), 'single' puts "
+        "the whole model on --device",
+    )
+    p.add_argument(
+        "--target-quant",
+        choices=["none", "4bit"],
+        default="none",
+        help="'4bit' loads the target with bitsandbytes NF4 quantization "
+        "(~4x smaller weights) for targets that do not fit in VRAM unquantized",
+    )
     return p.parse_args()
 
 
@@ -107,8 +133,31 @@ def load_models(args):
         .eval()
     )
 
-    print(f"Loading target: {args.target}")
-    target = AutoModelForCausalLM.from_pretrained(args.target, torch_dtype=dtype).to(device).eval()
+    print(f"Loading target: {args.target} (quant={args.target_quant})")
+    if args.target_quant == "4bit":
+        # bnb manages placement/dtype itself; torch_dtype must not be passed.
+        quant_config = BitsAndBytesConfig(
+            load_in_4bit=True,
+            bnb_4bit_quant_type="nf4",
+            bnb_4bit_compute_dtype=torch.bfloat16,
+        )
+        target = AutoModelForCausalLM.from_pretrained(
+            args.target, quantization_config=quant_config, device_map="auto"
+        ).eval()
+    elif args.target_device_map == "auto" and device.startswith("cuda"):
+        # Reserve ~4GiB per GPU so accelerate's placement leaves contiguous
+        # room for the largest single module tensor.
+        max_memory = {
+            i: f"{int(torch.cuda.get_device_properties(i).total_memory / 1e9) - 4}GiB"
+            for i in range(torch.cuda.device_count())
+        }
+        target = AutoModelForCausalLM.from_pretrained(
+            args.target, torch_dtype=dtype, device_map="auto", max_memory=max_memory
+        ).eval()
+    else:
+        target = (
+            AutoModelForCausalLM.from_pretrained(args.target, torch_dtype=dtype).to(device).eval()
+        )
 
     draft_tok = AutoTokenizer.from_pretrained(args.draft, trust_remote_code=True)
     target_tok = AutoTokenizer.from_pretrained(args.target, trust_remote_code=True)
