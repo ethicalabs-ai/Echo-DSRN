@@ -120,6 +120,13 @@ class TestLogitMasking:
         masked = mapper.mask_logits(logits)
         assert torch.isinf(masked[0, 32:]).all()
 
+    def test_mask_size_mismatch_raises_clear_error(self):
+        """A mapper sized from the tokenizer (not the LM head) must not crash cryptically."""
+        mapper = make_mapper(draft_vocab_size=32)
+        logits = torch.zeros(1, 64)  # model LM head is larger than the mapper
+        with pytest.raises(ValueError, match="draft mask size"):
+            mapper.mask_logits(logits)
+
 
 # ─────────────────────────────────────────────────────────────────────────────
 # 4. draft → target translation
@@ -217,6 +224,49 @@ class TestExactStringVerification:
         assert not bool(rejected)
 
 
+class _FakeTok:
+    """Minimal tokenizer stand-in for _build_exact_keys tests."""
+
+    def __init__(self, tokens):
+        self.tokens = tokens
+
+    def convert_ids_to_tokens(self, ids):
+        return [self.tokens[i] for i in ids]
+
+
+class TestExactKeyAlignment:
+    def test_equal_strings_get_equal_keys_across_vocabularies(self):
+        """First-appearance order differs per tokenizer; keys must still align
+        on the *string*, not the per-tokenizer sequence number."""
+        from echo_dsrn.speculative.vocab_mapper import _build_exact_keys
+
+        # draft order: " th", "T", "the"; target order: "X", "T", " th", "the"
+        draft = _FakeTok(["\u2581th", "T", "the"])
+        target = _FakeTok(["X", "T", "\u0120th", "the"])
+        shared: dict = {}
+        dk = _build_exact_keys(draft, 3, shared)
+        tk = _build_exact_keys(target, 4, shared)
+
+        assert dk[0] == tk[2], "' th' must share a key across vocabularies"
+        assert dk[1] == tk[1], "'T' must share a key across vocabularies"
+        assert dk[2] == tk[3], "'the' must share a key across vocabularies"
+        assert tk[0] != tk[2], "'X' and ' th' must stay distinct"
+
+    def test_same_string_iff_same_key(self):
+        """The exact-key invariant: keys equal exactly when strings equal."""
+        from echo_dsrn.speculative.vocab_mapper import _build_exact_keys
+
+        draft = _FakeTok(["\u2581th", "T", "the", "cat"])
+        target = _FakeTok(["T", "\u0120th", "dog", "the", "cat"])
+        shared: dict = {}
+        dk = _build_exact_keys(draft, 4, shared)
+        tk = _build_exact_keys(target, 5, shared)
+        for d_id, d_tok in enumerate(draft.tokens):
+            for t_id, t_tok in enumerate(target.tokens):
+                same_str = d_tok.replace("\u2581", " ") == t_tok.replace("\u0120", " ")
+                assert (dk.get(d_id, -1) == tk.get(t_id, -1)) == same_str
+
+
 # ─────────────────────────────────────────────────────────────────────────────
 # 7. Real-tokenizer build
 # ─────────────────────────────────────────────────────────────────────────────
@@ -271,3 +321,33 @@ class TestBuildVocabIntersection:
         logits = torch.zeros(1, mapper.draft_vocab_size)
         masked = mapper.mask_logits(logits)
         assert torch.isinf(masked[0, draft_tok.vocab_size :]).all()
+
+    def test_exact_keys_aligned_across_real_tokenizers(self):
+        """Keys must agree exactly when the token strings agree (regression:
+        per-tokenizer numbering collapsed acceptance to 0% for every
+        cross-vocabulary target)."""
+        from transformers import AutoTokenizer
+
+        draft_tok = AutoTokenizer.from_pretrained(
+            "ethicalabs/Echo-DSRN-114M-v0.1.2", trust_remote_code=True
+        )
+        target_tok = AutoTokenizer.from_pretrained("Qwen/Qwen2.5-0.5B", trust_remote_code=True)
+
+        mapper = build_vocab_intersection(draft_tok, target_tok)
+
+        mismatched = 0
+        checked = 0
+        for draft_id, target_id in mapper.draft_to_target.items():
+            d_key = mapper.draft_exact_keys.get(draft_id, -1)
+            t_key = mapper.target_exact_keys.get(target_id, -1)
+            d_str = draft_tok.convert_ids_to_tokens([draft_id])[0]
+            t_str = target_tok.convert_ids_to_tokens([target_id])[0]
+            for marker in ("\u0120", "\u2581"):
+                d_str = d_str.replace(marker, " ")
+                t_str = t_str.replace(marker, " ")
+            same_str = d_str == t_str
+            if same_str != (d_key == t_key):
+                mismatched += 1
+            checked += 1
+        assert checked > 1000
+        assert mismatched == 0, f"{mismatched} shared tokens have misaligned exact keys"

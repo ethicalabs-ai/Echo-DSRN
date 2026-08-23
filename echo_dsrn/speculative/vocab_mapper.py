@@ -113,6 +113,13 @@ class VocabMapper:
         to ``mask_value`` so ``argmax`` can never propose an unmappable token.
         """
         mask = self._get_draft_mask(logits.device)
+        if mask.shape[0] != logits.shape[-1]:
+            raise ValueError(
+                f"draft mask size {mask.shape[0]} does not match logits vocab "
+                f"{logits.shape[-1]} — pass draft_vocab_size=model.config.vocab_size "
+                f"to build_vocab_intersection when the LM head differs from the "
+                f"tokenizer vocab"
+            )
         return logits.masked_fill(~mask, mask_value)
 
     # ── Translation ───────────────────────────────────────────────────────
@@ -237,15 +244,22 @@ def _build_text_index(tokenizer, vocab_size: int) -> Dict[str, int]:
     return index
 
 
-def _build_exact_keys(tokenizer, vocab_size: int) -> Dict[int, int]:
+def _build_exact_keys(
+    tokenizer, vocab_size: int, key_by_string: Optional[Dict[str, int]] = None
+) -> Dict[int, int]:
     """Map token ids to an exact-string key (space markers normalized only).
 
     Equal keys mean the two tokens decode to the *same* string — no case or
     Unicode folding, because folding would make distinct tokens (e.g. ``the``
     vs ``The``) collide and corrupt the lossless verification.
+
+    Keys are assigned by first-appearance order in ``key_by_string``; pass the
+    *same* dict for both tokenizers so equal strings receive equal keys across
+    vocabularies (per-tokenizer numbering would make cross-vocabulary key
+    comparison meaningless).
     """
     tokens = tokenizer.convert_ids_to_tokens(list(range(vocab_size)))
-    key_by_string: Dict[str, int] = {}
+    key_by_string = {} if key_by_string is None else key_by_string
     keys: Dict[int, int] = {}
     for token_id, text in enumerate(tokens):
         if text is None or is_special_token(text):
@@ -293,11 +307,18 @@ def build_vocab_intersection(
     if unk_token_id is None:
         unk_token_id = getattr(draft_tokenizer, "unk_token_id", None)
 
+    # Shared key table so equal strings get equal exact keys across vocabularies.
+    key_by_string: Dict[str, int] = {}
+
     return VocabMapper(
         draft_to_target,
         draft_vocab_size=draft_vocab_size,
         target_vocab_size=target_vocab_size,
         draft_unk_id=unk_token_id,
-        draft_exact_keys=_build_exact_keys(draft_tokenizer, draft_tokenizer.vocab_size),
-        target_exact_keys=_build_exact_keys(target_tokenizer, target_tokenizer.vocab_size),
+        draft_exact_keys=_build_exact_keys(
+            draft_tokenizer, draft_tokenizer.vocab_size, key_by_string
+        ),
+        target_exact_keys=_build_exact_keys(
+            target_tokenizer, target_tokenizer.vocab_size, key_by_string
+        ),
     )
