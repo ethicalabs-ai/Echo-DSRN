@@ -821,9 +821,14 @@ class EchoModel(EchoPreTrainedModel):
 
         device = x.device
 
-        # Initialize states if not provided or if it's an empty Cache object
+        # Initialize states if not provided or if it's an empty Cache object.
+        # An EchoCache that already holds per-layer states is never empty, even
+        # for pure-DSRN (h, c) states whose get_seq_length() is 0 — otherwise
+        # cached continuation silently discards the recurrent state.
         is_empty_cache = (
-            hasattr(past_key_values, "get_seq_length") and past_key_values.get_seq_length() == 0
+            hasattr(past_key_values, "get_seq_length")
+            and past_key_values.get_seq_length() == 0
+            and not (isinstance(past_key_values, EchoCache) and len(past_key_values.states) > 0)
         )
         if past_key_values is None or is_empty_cache:
             past_key_values = []
