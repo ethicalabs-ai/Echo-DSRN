@@ -29,6 +29,14 @@ All notable changes to Echo-DSRN-HF are documented here.
   discarded the `(h, c)` state of 2-tuple (attention-less) caches on every
   cached forward. Non-empty `EchoCache` objects are now never treated as
   empty.
+- **Cached XLSTM continuation dropped its state (pending — ships with the
+  upcoming `echo_xlstm` module release).** `XLSTMCache`'s 3-tuple `(h, C, n)`
+  states report `get_seq_length() == 0`, so `XLSTMForCausalLM` re-initialized
+  the recurrent + matrix-memory state to zeros on every cached forward — any
+  stepwise/streaming generation of an attention-less XLSTM silently lost all
+  context after the prefill. Non-empty caches are now never treated as empty.
+  Affects `use_hybrid_attention=False` XLSTM configs only (e.g.
+  Echo-XLSTM-0.7B); one-shot inference and hybrid XLSTMs are unaffected.
 
 ---
 
