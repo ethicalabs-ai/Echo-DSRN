@@ -151,6 +151,16 @@ services:
       # HybridEchoCache.dsrn_states as a constant, wiping recurrent state
       # each decode step and causing hallucinations.
       - --enforce-eager
+      # Required for recurrent DSRN state in pooling runs: vLLM chunked
+      # prefill / prefix caching cannot carry the recurrent h/c state across
+      # chunk and cache-hit boundaries (only attention KV is cached), so
+      # multi-chunk or cache-hit requests run from zero state and return
+      # wrong, mode-dependent vectors. Disabling both forces every request to
+      # run its full text in one forward from fresh state (validated live:
+      # concurrent identical-text cosine 1.0000; see CoreWebUI IMPORTANT_FIX.md
+      # superseded addendum).
+      - --no-enable-prefix-caching
+      - --no-enable-chunked-prefill
     healthcheck:
       test: [ "CMD", "curl", "-f", "http://localhost:8002/health" ]
       interval: 30s
@@ -191,6 +201,16 @@ services:
       # Recurrent DSRN state: CUDA graph capture freezes HybridEchoCache
       # dsrn_states, wiping recurrent state each decode step.
       - --enforce-eager
+      # Required for recurrent DSRN state in pooling runs: vLLM chunked
+      # prefill / prefix caching cannot carry the recurrent h/c state across
+      # chunk and cache-hit boundaries (only attention KV is cached), so
+      # multi-chunk or cache-hit requests run from zero state and return
+      # wrong, mode-dependent vectors. Disabling both forces every request to
+      # run its full text in one forward from fresh state (validated live:
+      # concurrent identical-text cosine 1.0000; see CoreWebUI IMPORTANT_FIX.md
+      # superseded addendum).
+      - --no-enable-prefix-caching
+      - --no-enable-chunked-prefill
     healthcheck:
       test: [ "CMD", "curl", "-f", "http://localhost:8003/health" ]
       interval: 30s
